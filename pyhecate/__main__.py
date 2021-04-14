@@ -19,26 +19,36 @@ def cli():
     )
     parser.add_argument(
         "-d",
+        "--dir",
+        action='store_true',
+        help='path is a folder with video files'
+    )
+    parser.add_argument(
+        "-o",
         "--outdir",
-        metavar="outdir"
+        metavar="outdir",
+        help = 'output folder for created folders'
     )
     parser.add_argument(
         "-s",
         "--snapevery",
         metavar="snapevery",
         default=30,
-        type=int
+        type=int,
+        help = 'make a JPG every n seconds'
     )
     parser.add_argument(
         "-a",
         "--outro",
-        metavar="outro"
+        metavar="outro",
+        help = 'append an outro video file to summary video'
     )
     parser.add_argument(
         '-V',
         '--version',
         action='version',
-        version='%s %s' % (PROG, pyhecate.__version__)
+        version='%s %s' % (PROG, pyhecate.__version__),
+        help='show version and exit'
     )
 
     return parser

@@ -6,7 +6,7 @@ pyhecate
 Copyright (c) 2021 Adam Twardoch <adam+github@twardoch.com>
 MIT license. Python 3.8+
 """
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = ['__main__']
 
@@ -76,16 +76,12 @@ def add_outro(mp4temppath, outropath, mp4path, vaudio):
         if os.path.exists(mp4path):
             os.remove(mp4temppath)
 
-def app(path=None, outdir=None, snapevery=30, outro=None):
-    if not (os.path.exists(path)):
-        return False
+def procvid(path=None, outdir=None, snapevery=30, outro=None):
     vseconds, vwidth, vheight, vaudio = video_meta(path)
-    if not outdir:
-        outdir = os.path.splitext(path)[0]
     if os.path.exists(outdir):
         shutil.rmtree(outdir)
-    #else:
-    #    os.makedirs(outdir)
+    else:
+        os.makedirs(outdir)
     base = os.path.split(outdir)[1]
     numsnaps = max(int(vseconds / snapevery), 10)
     mp4dir = os.path.join(outdir, "mp4")
@@ -140,4 +136,25 @@ def app(path=None, outdir=None, snapevery=30, outro=None):
     for gif in gifs:
         dest = os.path.join(gifdir, os.path.split(gif)[1])
         shutil.move(gif, dest)
+    return os.path.exists(mp4path)
+
+def app(path=None, dir=None, outdir=None, snapevery=30, outro=None):
+    if not (os.path.exists(path)):
+        return False
+    if not outdir:
+        outdir = os.path.split(path)[0]
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    if dir:
+        vpaths = [os.path.abspath(p) for p in glob.glob(os.path.join(path, '*.mp4'))]
+    else:
+        vpaths = [os.path.abspath(path)]
+    for vpath in vpaths:
+        logging.info('\n\nPROCESSING %s' % (vpath))
+        dp = os.path.split(vpath)
+        voutdir = os.path.join(outdir, os.path.splitext(dp[1])[0])
+        if procvid(vpath, voutdir, snapevery, outro):
+            logging.info('SUCCESS: %s' % (vpath))
+        else:
+            logging.error('FAIL: %s' % (vpath))
     return True

@@ -14,12 +14,13 @@ import os
 import shutil
 import glob
 import logging
-import ffmpeg
 import json
 import subprocess
 import tempfile
+import time
+import ffmpeg
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 def video_meta(path):
@@ -165,14 +166,15 @@ def app(path=None, dir=None, outdir=None, snapevery=30, outro=None):
         vpaths = [os.path.abspath(path)]
     for vpath in vpaths:
         logging.info('\n\nCreating snaps and summary:\n%s' % (vpath))
+        time.sleep(10)
         dp = os.path.split(vpath)
         voutdir = os.path.join(outdir, os.path.splitext(dp[1])[0])
         if make_snaps(vpath, voutdir, snapevery):
-            logging.info('Created snaps:\n%s' % (vpath))
+            logging.info('(Created snaps:)\n%s' % (vpath))
         else:
-            logging.error('Fail snaps:\n%s' % (vpath))
+            logging.error('(*** Fail snaps:)\n%s' % (vpath))
         if make_vsum(vpath, voutdir, outro):
-            logging.info('Created summary:\n%s' % (vpath))
+            logging.info('(Created summary:)\n%s' % (vpath))
         else:
-            logging.error('Failed summary:\n%s' % (vpath))
+            logging.error('(*** Failed summary:)\n%s' % (vpath))
     return True

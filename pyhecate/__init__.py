@@ -6,7 +6,7 @@ pyhecate
 Copyright (c) 2021 Adam Twardoch <adam+github@twardoch.com>
 MIT license. Python 3.8+
 """
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 __all__ = ['__main__']
 
@@ -76,21 +76,12 @@ def add_outro(mp4temppath, outropath, mp4path, vaudio):
         if os.path.exists(mp4path):
             os.remove(mp4temppath)
 
-def procvid(path=None, outdir=None, snapevery=30, outro=None):
+def make_snaps(path=None, outdir=None, snapevery=30):
     vseconds, vwidth, vheight, vaudio = video_meta(path)
-    if os.path.exists(outdir):
-        shutil.rmtree(outdir)
-    else:
+    if not os.path.exists(outdir):
         os.makedirs(outdir)
     base = os.path.split(outdir)[1]
     numsnaps = max(int(vseconds / snapevery), 10)
-    mp4dir = os.path.join(outdir, "mp4")
-    if not os.path.exists(mp4dir):
-        os.makedirs(mp4dir)
-    mp4temppath = os.path.join(outdir, base + "_sum.mp4")
-    mp4path = os.path.join(mp4dir, base + "_sum.mp4")
-    if os.path.exists(mp4path):
-        os.remove(mp4path)
     jpgdir = os.path.join(outdir, "jpg")
     if not os.path.exists(jpgdir):
         os.makedirs(jpgdir)
@@ -104,9 +95,6 @@ def procvid(path=None, outdir=None, snapevery=30, outro=None):
         "hecate",
         "--in_video", path,
         "--out_dir", outdir,
-        "--generate_mov",
-        "--lmov", str(16),
-        "--mov_width_px", str(vwidth),
         "--generate_jpg",
         "--njpg", str(numsnaps),
         "--jpg_width_px", str(vwidth),
@@ -115,15 +103,10 @@ def procvid(path=None, outdir=None, snapevery=30, outro=None):
         "--ngif", str(numsnaps),
         "--gif_width_px", str(360)
     ]
-    print(" ".join(hecate_cmd))
+    logging.info(" ".join(hecate_cmd))
     hecate_out = subprocess.run(hecate_cmd, capture_output=True)
     if not hecate_out:
         return False
-    if os.path.exists(mp4temppath):
-        if outro and not os.path.exists(outro) or not outro:
-            shutil.move(mp4temppath, mp4path)
-        else:
-            add_outro(mp4temppath, outro, mp4path, vaudio)
     jpgs = glob.glob(os.path.join(outdir, "*.jpg"))
     for jpg in jpgs:
         dest = os.path.join(jpgdir, os.path.split(jpg)[1])
@@ -136,6 +119,37 @@ def procvid(path=None, outdir=None, snapevery=30, outro=None):
     for gif in gifs:
         dest = os.path.join(gifdir, os.path.split(gif)[1])
         shutil.move(gif, dest)
+    return True
+
+def make_vsum(path=None, outdir=None, outro=None):
+    vseconds, vwidth, vheight, vaudio = video_meta(path)
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    base = os.path.split(outdir)[1]
+    mp4dir = os.path.join(outdir, "mp4")
+    if not os.path.exists(mp4dir):
+        os.makedirs(mp4dir)
+    mp4temppath = os.path.join(outdir, base + "_sum.mp4")
+    mp4path = os.path.join(mp4dir, base + "_sum.mp4")
+    if os.path.exists(mp4path):
+        os.remove(mp4path)
+    hecate_cmd = [
+        "hecate",
+        "--in_video", path,
+        "--out_dir", outdir,
+        "--generate_mov",
+        "--lmov", str(16),
+        "--mov_width_px", str(vwidth),
+    ]
+    logging.info(" ".join(hecate_cmd))
+    hecate_out = subprocess.run(hecate_cmd, capture_output=True)
+    if not hecate_out:
+        return False
+    if os.path.exists(mp4temppath):
+        if outro and not os.path.exists(outro) or not outro:
+            shutil.move(mp4temppath, mp4path)
+        else:
+            add_outro(mp4temppath, outro, mp4path, vaudio)
     return os.path.exists(mp4path)
 
 def app(path=None, dir=None, outdir=None, snapevery=30, outro=None):
@@ -150,11 +164,15 @@ def app(path=None, dir=None, outdir=None, snapevery=30, outro=None):
     else:
         vpaths = [os.path.abspath(path)]
     for vpath in vpaths:
-        logging.info('\n\nPROCESSING %s' % (vpath))
+        logging.info('\n\nCreating snaps and summary:\n%s' % (vpath))
         dp = os.path.split(vpath)
         voutdir = os.path.join(outdir, os.path.splitext(dp[1])[0])
-        if procvid(vpath, voutdir, snapevery, outro):
-            logging.info('SUCCESS: %s' % (vpath))
+        if make_snaps(vpath, voutdir, snapevery):
+            logging.info('Created snaps:\n%s' % (vpath))
         else:
-            logging.error('FAIL: %s' % (vpath))
+            logging.error('Fail snaps:\n'%s' % (vpath))
+        if make_vsum(vpath, voutdir, outro):
+            logging.info('Created summary:\n%s' % (vpath))
+        else:
+            logging.error('Failed summary:\n%s' % (vpath))
     return True

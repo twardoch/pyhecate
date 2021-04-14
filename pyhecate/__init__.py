@@ -170,7 +170,7 @@ def app(path=None, dir=None, outdir=None, snapevery=30, outro=None):
         if make_snaps(vpath, voutdir, snapevery):
             logging.info('Created snaps:\n%s' % (vpath))
         else:
-            logging.error('Fail snaps:\n'%s' % (vpath))
+            logging.error('Fail snaps:\n%s' % (vpath))
         if make_vsum(vpath, voutdir, outro):
             logging.info('Created summary:\n%s' % (vpath))
         else:

@@ -97,7 +97,12 @@ class PyHecateVideo(object):
         ometa, oseconds, owidth, oheight, oaudio = self._video_meta(self.outro)
         out = None
         if ometa:
-            ffmpeg_args = ['-loglevel', 'error', '-nostdin', '-y']
+            ffmpeg_args = [
+                '-loglevel', 'error',
+                '-max_muxing_queue_size', '9999',
+                '-nostdin',
+                '-y',
+            ]
             in1 = ffmpeg.input(self.mp4sumpath)
             in2 = ffmpeg.input(self.outro)
             v1 = in1.video
@@ -114,7 +119,17 @@ class PyHecateVideo(object):
                 v3 = joined[0]
                 out = ffmpeg.output(v3, self.mp4outpath).global_args(*ffmpeg_args)
         if out:
-            return out.run()
+            try:
+                process = out.run_async(pipe_stdout=True, pipe_stderr=True)
+                sout, serr = process.communicate()
+                if serr:
+                    logging.error(serr)
+                    return False
+                else:
+                    return True
+            except:
+                logging.error('Failed adding outro to:\n%s' % self.mp4sumpath)
+                send2trash(self.mp4outpath)
         else:
             return None
 

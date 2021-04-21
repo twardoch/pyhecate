@@ -40,10 +40,10 @@ class PyHecateVideo(object):
             gifwidth=GIFWIDTH
         ):
         # Quasi-constants
-        self.mp4sumsuf = '_sum.mp4'
-        self.mp4outsuf = '_outsum.mp4'
         self.gifwidth = gifwidth
         self.vsumlength = vsumlength
+        self.mp4sumsuf = '_sum-%s.mp4' % vsumlength
+        self.mp4outsuf = '_outsum-%s.mp4' % vsumlength
         # Params
         self.path = path
         self.dir = dir
@@ -123,15 +123,17 @@ class PyHecateVideo(object):
                 process = out.run_async(pipe_stdout=True, pipe_stderr=True)
                 sout, serr = process.communicate()
                 if serr:
-                    logging.error(serr)
+                    logging.error('ffmpeg error when adding outro:\n%s' % serr)
+                    send2trash(self.mp4outpath)
                     return False
                 else:
                     return True
             except:
                 logging.error('Failed adding outro to:\n%s' % self.mp4sumpath)
                 send2trash(self.mp4outpath)
+                return False
         else:
-            return None
+            return False
 
     def run_hecate(self):
         # Run hecate app
@@ -165,17 +167,17 @@ class PyHecateVideo(object):
             os.makedirs(self.outdir)
         self.numsnaps = max(int(self.vseconds / self.isumfreq), 10)
         if self.isum:
-            self.jpgdir = os.path.join(self.outdir, "jpg")
+            self.jpgdir = os.path.join(self.outdir, "jpg-%s" % self.vwidth)
             if not os.path.exists(self.jpgdir):
                 os.makedirs(self.jpgdir)
-            self.gifdir = os.path.join(self.outdir, "gif")
+            self.gifdir = os.path.join(self.outdir, "gif-%s" % self.gifwidth)
             if not os.path.exists(self.gifdir):
                 os.makedirs(self.gifdir)
-            self.gifsumdir = os.path.join(self.outdir, "gifsum")
+            self.gifsumdir = os.path.join(self.outdir, "gifsum-%s" % self.gifwidth)
             if not os.path.exists(self.gifsumdir):
                 os.makedirs(self.gifsumdir)
         if self.vsum:
-            self.mp4dir = os.path.join(self.outdir, "mp4")
+            self.mp4dir = os.path.join(self.outdir, "mp4-%s" % self.vsumlength)
             if not os.path.exists(self.mp4dir):
                 os.makedirs(self.mp4dir)
             self.mp4tmppath = os.path.join(self.outdir, self.base + "_sum.mp4")
@@ -254,7 +256,7 @@ class PyHecate(object):
             self.summarize(vpath)
 
     def summarize(self, vpath):
-        logging.info('Processing:\n%s' % (vpath))
+        logging.info('\n\nProcessing:\n%s' % (vpath))
         time.sleep(1)
         dp = os.path.split(vpath)
         voutdir = os.path.join(self.outdir, os.path.splitext(dp[1])[0])

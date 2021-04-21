@@ -5,6 +5,7 @@
 
 import pyhecate
 from argparse import ArgumentParser
+import logging
 
 PROG = 'pyhecate'
 
@@ -12,38 +13,85 @@ def cli():
     parser = ArgumentParser(
         prog="%s" % PROG
     )
-    parser.add_argument(
+    group = parser.add_argument_group('paths and folders')
+    group.add_argument(
         'path',
         metavar='path',
         help='path to video file'
     )
-    parser.add_argument(
+    group.add_argument(
         "-d",
         "--dir",
+        dest='dir',
         action='store_true',
         help='path is a folder with video files'
     )
-    parser.add_argument(
+    group.add_argument(
         "-o",
         "--outdir",
-        metavar="outdir",
+        dest='outdir',
+        metavar="output_folder",
         help = 'output folder for created folders'
     )
-    parser.add_argument(
-        "-s",
-        "--snapevery",
-        metavar="snapevery",
-        default=30,
+    group = parser.add_argument_group('make images')
+    group.add_argument(
+        "-i",
+        "--image-every",
+        dest='isumfreq',
+        metavar="secs",
+        default=pyhecate.ISUMFREQ,
         type=int,
-        help = 'make a JPG every n seconds'
+        help = 'JPG snapshot frequency in seconds (default: %(default)s)'
     )
-    parser.add_argument(
+    group.add_argument(
+        "-g",
+        "--gif-width",
+        dest='gifwidth',
+        metavar="px",
+        default=pyhecate.GIFWIDTH,
+        type=int,
+        help='GIF width (default: %(default)s)'
+    )
+    group.add_argument(
+        "-I",
+        "--skip-images",
+        dest='isum',
+        action='store_false',
+        help='skip making JPG & GIF images'
+    )
+    group = parser.add_argument_group('make video summary')
+    group.add_argument(
+        "-s",
+        "--video-length",
+        dest='vsumlength',
+        metavar="secs",
+        default=pyhecate.VSUMLENGTH,
+        type=int,
+        help='video summary length in seconds (default: %(default)s)'
+    )
+    group.add_argument(
         "-a",
         "--outro",
-        metavar="outro",
-        help = 'append an outro video file to summary video'
+        dest='outro',
+        metavar="path_to_outro_video",
+        help = 'append outro video to summary video'
     )
-    parser.add_argument(
+    group.add_argument(
+        "-S",
+        "--skip-video-summary",
+        dest='vsum',
+        action='store_false',
+        help='skip making the video summary MP4 file'
+    )
+    group = parser.add_argument_group('other')
+    group.add_argument(
+        '-v',
+        '--verbose',
+        action='count',
+        default=1,
+        help='-v show progress, -vv show debug'
+    )
+    group.add_argument(
         '-V',
         '--version',
         action='version',
@@ -57,9 +105,13 @@ def cli():
 def main(*args, **kwargs):
     parser = cli(*args, **kwargs)
     opts = parser.parse_args()
-    if opts:
-        opts = vars(opts)
-        pyhecate.app(**opts)
+    opts.verbose = 40 - (10 * opts.verbose) if opts.verbose > 0 else 0
+    logging.basicConfig(level=opts.verbose, format='%(asctime)s %(levelname)s: %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
+    opts = vars(opts)
+    logging.debug('Running with options:\n%s' % repr(opts))
+    del opts['verbose']
+    pyh = pyhecate.PyHecate(**opts)
 
 if __name__ == '__main__':
     main()

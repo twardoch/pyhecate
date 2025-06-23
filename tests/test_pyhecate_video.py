@@ -133,7 +133,7 @@ def test_prep_outfolders(temp_outdir):
     assert os.path.exists(pv.gifdir)
     assert os.path.exists(pv.gifsumdir)
     assert os.path.exists(pv.mp4dir)
-    assert pv.numsnaps == max(int(600/30), 10)
+    assert pv.numsnaps == max(600 // 30, 10)
     assert pv.mp4tmppath is not None
     assert pv.mp4sumpath is not None
     assert pv.mp4outpath is not None

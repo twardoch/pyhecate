@@ -225,6 +225,8 @@ class PyHecateVideo:
         # Prepare folders
         if not os.path.exists(self.outdir):
             os.makedirs(self.outdir)
+        if self.isumfreq < 0:
+            raise ValueError("isumfreq must be non-negative")
         self.numsnaps = (
             max(int(self.vseconds / self.isumfreq), 10) if self.isumfreq > 0 else 10
         )

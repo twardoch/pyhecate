@@ -378,7 +378,6 @@ class PyHecate:
         self, vpath: str
     ) -> None:  # Renamed from summarize to avoid confusion
         logging.info(f"\n\nProcessing: {vpath}")
-        time.sleep(1)  # Is this sleep necessary?
         dp: Tuple[str, str] = os.path.split(vpath)
         video_name_without_ext: str = os.path.splitext(dp[1])[0]
 

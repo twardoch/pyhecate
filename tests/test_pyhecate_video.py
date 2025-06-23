@@ -1,0 +1,226 @@
+import pytest
+import os
+import pyhecate # Import the main module
+from pyhecate import PyHecateVideo, ISUMFREQ, VSUMLENGTH, GIFWIDTH
+from unittest.mock import patch, MagicMock
+
+# Define a fixture for a temporary output directory
+@pytest.fixture
+def temp_outdir(tmp_path):
+    d = tmp_path / "output"
+    d.mkdir()
+    return str(d)
+
+# Test basic instantiation of PyHecateVideo
+def test_pyhecate_video_instantiation(temp_outdir):
+    """Test that PyHecateVideo can be instantiated."""
+    video_path = "dummy.mp4"  # Dummy path, file doesn't need to exist for this test
+
+    # Create a dummy video file for os.path.exists checks if needed by constructor logic
+    with open(video_path, "w") as f:
+        f.write("dummy video content")
+
+    try:
+        pv = PyHecateVideo(
+            path=video_path,
+            outdir=temp_outdir,
+            isumfreq=10,
+            vsumlength=5,
+            outro="outro.mp4",
+            vsum=True,
+            isum=True,
+            gifwidth=300,
+        )
+        assert pv.path == video_path
+        assert pv.outdir == temp_outdir
+        assert pv.isumfreq == 10
+        assert pv.vsumlength == 5
+        assert pv.outro == "outro.mp4"
+        assert pv.vsum is True
+        assert pv.isum is True
+        assert pv.gifwidth == 300
+        assert pv.base == os.path.basename(temp_outdir)
+    finally:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
+
+# Test _video_meta with mocked subprocess
+@patch("subprocess.run")
+def test_video_meta_success(mock_subprocess_run, temp_outdir):
+    """Test the _video_meta method on a successful ffprobe call."""
+    video_path = "test.mp4"
+    # Create a dummy video file for os.path.exists checks
+    with open(video_path, "w") as f:
+        f.write("dummy video content")
+
+    mock_ffprobe_output = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "duration": "120.0",
+                "width": 1920,
+                "height": 1080,
+            },
+            {"codec_type": "audio"},
+        ],
+        "format": {"duration": "120.0"},
+    }
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = json.dumps(mock_ffprobe_output)
+    mock_result.stderr = ""
+    mock_subprocess_run.return_value = mock_result
+
+    pv = PyHecateVideo(path=video_path, outdir=temp_outdir)
+
+    try:
+        vmeta, vseconds, vwidth, vheight, vaudio = pv._video_meta(video_path)
+
+        assert vmeta is True
+        assert vseconds == 120
+        assert vwidth == 1920
+        assert vheight == 1080
+        assert vaudio is True
+        mock_subprocess_run.assert_called_once()
+        args, _ = mock_subprocess_run.call_args
+        assert "ffprobe" in args[0]
+        assert video_path in args[0]
+    finally:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
+@patch("subprocess.run")
+def test_video_meta_ffprobe_failure(mock_subprocess_run, temp_outdir):
+    """Test the _video_meta method when ffprobe fails."""
+    video_path = "fail.mp4"
+    with open(video_path, "w") as f:
+        f.write("dummy video content")
+
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    mock_result.stderr = "ffprobe error"
+    mock_subprocess_run.return_value = mock_result
+
+    pv = PyHecateVideo(path=video_path, outdir=temp_outdir)
+    try:
+        vmeta, vseconds, vwidth, vheight, vaudio = pv._video_meta(video_path)
+        assert vmeta is False
+        assert vseconds == 0
+        assert vwidth == 0
+        assert vheight == 0
+        assert vaudio is False
+    finally:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
+# Test prep_outfolders
+def test_prep_outfolders(temp_outdir):
+    """Test that prep_outfolders creates the necessary directories."""
+    video_path = "dummy_prep.mp4"
+    pv = PyHecateVideo(path=video_path, outdir=temp_outdir)
+    # Simulate metadata that would be set by _video_meta
+    pv.vseconds = 600
+    pv.vwidth = 1280
+    pv.isumfreq = 30 # ensure numsnaps is reasonable
+    pv.isum = True
+    pv.vsum = True
+
+    pv.prep_outfolders()
+
+    assert os.path.exists(pv.jpgdir)
+    assert os.path.exists(pv.gifdir)
+    assert os.path.exists(pv.gifsumdir)
+    assert os.path.exists(pv.mp4dir)
+    assert pv.numsnaps == max(int(600/30), 10)
+    assert pv.mp4tmppath is not None
+    assert pv.mp4sumpath is not None
+    assert pv.mp4outpath is not None
+
+# Minimal test for PyHecate instantiation (main class)
+@patch("pyhecate.PyHecateVideo._video_meta")
+def test_pyhecate_instantiation(mock_video_meta, tmp_path):
+    """Test basic instantiation of the main PyHecate class."""
+    # Mock _video_meta to prevent actual ffprobe calls and return benign values
+    mock_video_meta.return_value = (True, 60, 1280, 720, False) # meta, secs, w, h, audio
+
+    # PyHecate's __init__ tries to process videos, so we need to be careful
+    # or mock heavily. For a simple instantiation test, provide a non-existent path
+    # or a path that results in no videos if dir_mode=True
+    dummy_file_path = tmp_path / "non_existent_video.mp4"
+
+    # This will log an error but shouldn't crash if path doesn't exist
+    ph = pyhecate.PyHecate(path=str(dummy_file_path))
+    assert isinstance(ph, pyhecate.PyHecate)
+    assert not ph.vpaths  # No video paths should be found
+    # self.outdir might not be set if path doesn't exist and __init__ returns early
+
+    dummy_dir_path = tmp_path / "empty_video_dir"
+    dummy_dir_path.mkdir()
+    ph_dir = pyhecate.PyHecate(path=str(dummy_dir_path), dir_mode=True)
+    assert isinstance(ph_dir, pyhecate.PyHecate)
+    assert not ph_dir.vpaths  # No videos in the directory
+    # In dir_mode with existing dir, outdir should default to the input path if not specified
+    assert hasattr(ph_dir, "outdir") and ph_dir.outdir == str(dummy_dir_path)
+
+
+    # Test with a custom output directory
+    custom_outdir_path = tmp_path / "custom_out"
+    # Use a dummy file that exists for this part of the test to ensure outdir is processed
+    dummy_existing_file_for_outdir_test = tmp_path / "exists.mp4"
+    dummy_existing_file_for_outdir_test.write_text("content")
+
+    ph_custom_out = pyhecate.PyHecate(path=str(dummy_existing_file_for_outdir_test), outdir=str(custom_outdir_path))
+    assert hasattr(ph_custom_out, "outdir") and ph_custom_out.outdir == str(custom_outdir_path)
+    assert os.path.exists(custom_outdir_path)  # outdir should be created
+
+# It's good practice to also have a test for the CLI.
+# This is more involved as it requires mocking subprocess calls for hecate and ffmpeg.
+# For now, we'll add a placeholder or a very simple CLI test.
+from pyhecate.__main__ import cli as get_cli_parser
+import subprocess
+
+def test_cli_version():
+    """Test that the CLI parser has a version action."""
+    parser = get_cli_parser()
+    with pytest.raises(SystemExit) as e:
+        parser.parse_args(["--version"])
+    assert e.value.code == 0 # Successful exit for --version
+
+@patch("pyhecate.PyHecate.__init__", return_value=None) # Mock PyHecate instantiation
+def test_main_cli_runs(mock_pyhecate_init, caplog, tmp_path):
+    """ Test that the main CLI function can be called. """
+    from pyhecate.__main__ import main as pyhecate_main
+
+    dummy_video = tmp_path / "video.mp4"
+    dummy_video.write_text("content")
+
+    # Test with minimal arguments
+    with patch.object(sys, "argv", ["pyhecate", str(dummy_video)]):
+        pyhecate_main()
+        mock_pyhecate_init.assert_called_once()
+        # Check some default values passed to PyHecate
+        args, kwargs = mock_pyhecate_init.call_args
+        assert kwargs['path'] == str(dummy_video)
+        assert kwargs['dir_mode'] is False
+        assert kwargs['isumfreq'] == ISUMFREQ
+
+    mock_pyhecate_init.reset_mock()
+    # Test with --dir mode
+    dummy_dir = tmp_path / "videos"
+    dummy_dir.mkdir()
+    (dummy_dir / "vid1.mp4").write_text("v1")
+
+    with patch.object(sys, "argv", ["pyhecate", str(dummy_dir), "--dir"]):
+        pyhecate_main()
+        mock_pyhecate_init.assert_called_once()
+        args, kwargs = mock_pyhecate_init.call_args
+        assert kwargs['path'] == str(dummy_dir)
+        assert kwargs['dir_mode'] is True
+        # PyHecate itself will find vpaths, we just check the path argument here
+
+# Need to import json for the mock_ffprobe_output
+import json
+# Need to import sys for patching sys.argv
+import sys

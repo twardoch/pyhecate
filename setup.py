@@ -16,9 +16,8 @@ def get_version(*args):
     with open(os.path.join(NAME, "__init__.py"), encoding="utf-8") as f:
         verstrline = f.read()
     VSRE = r"^__version__ = ['\"]([^'\"]*)['\"]"
-    mo = re.search(VSRE, verstrline, re.M)
-    if mo:
-        return mo.group(1)
+    if mo := re.search(VSRE, verstrline, re.M):
+        return mo[1]
     return "undefined"
 
 

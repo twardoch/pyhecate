@@ -6,6 +6,8 @@ Copyright (c) 2021 Adam Twardoch <adam+github@twardoch.com>
 MIT license. Python 3.8+
 """
 
+__version__ = "1.0.3"
+
 __all__ = ["__main__"]
 
 import glob
@@ -13,198 +15,86 @@ import json
 import logging
 import os
 import shutil
-import shlex # Moved import shlex to top-level
 import subprocess
-# import time # Unused import removed by ruff, confirming
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
+import tempfile
+import time
 
-import ffmpeg  # type: ignore
-from send2trash import send2trash  # type: ignore
+import ffmpeg
+from send2trash import send2trash
 
-ISUMFREQ: int = 30
-VSUMLENGTH: int = 16
-GIFWIDTH: int = 360
-
-
-class VideoMetadata(TypedDict):
-    """
-    Represents the extracted metadata from a video file.
-
-    Attributes:
-        success: True if metadata extraction was successful, False otherwise.
-        vseconds: Duration of the video in seconds.
-        vwidth: Width of the video in pixels.
-        vheight: Height of the video in pixels.
-        vaudio: True if the video has an audio stream, False otherwise.
-    """
-
-    success: bool
-    vseconds: int
-    vwidth: int
-    vheight: int
-    vaudio: bool
+ISUMFREQ = 30
+VSUMLENGTH = 16
+GIFWIDTH = 360
 
 
 class PyHecateVideo:
-    """
-    Handles the processing of a single video file to generate summaries,
-    thumbnails, and GIFs using 'hecate' and 'ffmpeg'.
-    """
-
     def __init__(
         self,
-        path: str,
-        outdir: str,
-        isumfreq: int = ISUMFREQ,
-        vsumlength: int = VSUMLENGTH,
-        outro: Optional[str] = None,
-        vsum: bool = True,
-        isum: bool = True,
-        gifwidth: int = GIFWIDTH,
-    ) -> None:
-        """
-        Initializes PyHecateVideo for processing a single video.
-
-        Args:
-            path: Path to the input video file.
-            outdir: Directory where output subfolders and files will be created.
-                    This directory itself will be created if it doesn't exist.
-            isumfreq: Frequency in seconds for JPG snapshots.
-            vsumlength: Length of the video summary in seconds.
-            outro: Optional path to an outro video to append to the summary.
-            vsum: If True, generate video summary.
-            isum: If True, generate image summaries (JPGs, GIFs).
-            gifwidth: Width of the generated GIFs in pixels.
-        """
+        path=None,
+        dir=None,
+        outdir=None,
+        isumfreq=ISUMFREQ,
+        vsumlength=VSUMLENGTH,
+        outro=None,
+        vsum=True,
+        isum=True,
+        gifwidth=GIFWIDTH,
+    ):
         # Quasi-constants
-        self.gifwidth: int = gifwidth
-        self.vsumlength: int = vsumlength
-        self.mp4sumsuf: str = f"_sum-{vsumlength}.mp4"
-        self.mp4outsuf: str = f"_outsum-{vsumlength}.mp4"
+        self.gifwidth = gifwidth
+        self.vsumlength = vsumlength
+        self.mp4sumsuf = "_sum-%s.mp4" % vsumlength
+        self.mp4outsuf = "_outsum-%s.mp4" % vsumlength
         # Params
         self.path: str = path
         self.outdir: str = outdir
         if not os.path.exists(self.outdir):
             os.makedirs(self.outdir)
-        self.base: str = os.path.split(self.outdir)[1]
-        self.isumfreq: int = isumfreq
-        self.outro: Optional[str] = outro
-        self.vsum: bool = vsum
-        self.isum: bool = isum
-        self.vseconds: int = 0
-        self.vwidth: int = 0
-        self.vheight: int = 0
-        self.vaudio: bool = False
-        self.vmeta: bool = False
-        self.jpgdir: Optional[str] = None
-        self.gifdir: Optional[str] = None
-        self.gifsumdir: Optional[str] = None
-        self.mp4dir: Optional[str] = None
-        self.mp4sumpath: Optional[str] = None
-        self.mp4tmppath: Optional[str] = None
-        self.mp4outpath: Optional[str] = None
-        self.numsnaps: int = 0
+        self.base = os.path.split(self.outdir)[1]
+        self.isumfreq = isumfreq
+        self.outro = outro
+        self.vsum = vsum
+        self.isum = isum
+        self.vseconds = 0
+        self.vwidth = 0
+        self.vheight = 0
+        self.vaudio = False
+        self.vmeta = False
+        self.jpgdir = None
+        self.gifdir = None
+        self.gifsumdir = None
+        self.mp4dir = None
+        self.mp4sumpath = None
+        self.mp4tmppath = None
+        self.mp4outpath = None
+        self.numsnaps = 0
 
-    def _get_video_meta(self, path: str) -> VideoMetadata:
-        """
-        Retrieves video metadata (duration, dimensions, audio presence) using ffprobe.
-
-        Args:
-            path: The path to the video file.
-
-        Returns:
-            A VideoMetadata object containing the extracted information.
-            The 'success' field in VideoMetadata indicates if extraction was successful.
-        """
-        meta_dict: Dict[str, Any] = {}
-        vseconds: int = 0
-        vwidth: int = 0
-        vheight: int = 0
-        vaudio: bool = False
-        success: bool = False
-
-        command: str = (
-            f'ffprobe -v quiet -print_format json -show_format -show_streams "{path}"'
+    def _video_meta(self, path):
+        meta = {}
+        vaudio = False
+        command = (
+            f"ffprobe -v quiet -print_format json -show_format -show_streams {path}"
         )
-        try:
-            # Note: Using shell=True can be a security risk if path is not sanitized.
-            # However, ffprobe path arguments are typically safe.
-            # Splitting the command manually is safer if paths can have spaces.
-            # For now, assuming paths are manageable or this will be reviewed.
-            # Using command.split() is generally safer than shell=True.
-            # Ensure path is properly quoted if it can contain spaces.
-            # Let's use command.split() for better security for now.
-            # If paths have spaces, ffmpeg-python handles it, but direct subprocess needs care.
-            # Path is quoted in the command string, so shell=True might be needed if not splitting.
-            # Sticking to command.split() and assuming paths won't break this simple split.
-            # A more robust way: shlex.split(command)
-            # import shlex # Import shlex for robust command splitting -> Moved to top
+        result = subprocess.run(command.split(), capture_output=True)
+        if result.returncode == 0 and os.path.exists(path):
+            meta = json.loads(result.stdout)
+        else:
+            logging.error(f"FFProbe failed for {path}, output: {result.stderr}")
+            return (False, 0, 0, 0, False)
+        for stream in meta.get("streams", []):
+            if stream["codec_type"] == "video":
+                vseconds = int(float(stream["duration"]))
+                vwidth = stream["width"]
+                vheight = stream["height"]
+            if stream["codec_type"] == "audio":
+                vaudio = True
+        return (True, vseconds, vwidth, vheight, vaudio)
 
-            result = subprocess.run(
-                shlex.split(command), capture_output=True, text=True, check=True
-            )
-            if os.path.exists(path):  # Re-check after ffprobe, path might be gone
-                meta_dict = json.loads(result.stdout)
-                success = True
-            else:
-                logging.error(f"Video file disappeared during ffprobe: {path}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f'FFProbe failed for "{path}", error: {e.stderr}')
-        except json.JSONDecodeError:
-            logging.error(f'FFProbe output for "{path}" is not valid JSON.')
-        except FileNotFoundError:  # If ffprobe itself is not found
-            logging.error(
-                "ffprobe command not found. Please ensure it is installed and in your PATH."
-            )
-
-        if success:
-            for stream in meta_dict.get("streams", []):
-                if stream.get("codec_type") == "video":
-                    vseconds = int(float(stream.get("duration", 0)))
-                    vwidth = int(stream.get("width", 0))
-                    vheight = int(stream.get("height", 0))
-                if stream.get("codec_type") == "audio":
-                    vaudio = True
-
-            if vwidth == 0 or vheight == 0:  # Ensure we got valid video dimensions
-                logging.error(
-                    f'FFProbe could not determine video dimensions for "{path}"'
-                )
-                success = False  # Mark as failure if dimensions are invalid
-
-        return VideoMetadata(
-            success=success,
-            vseconds=vseconds,
-            vwidth=vwidth,
-            vheight=vheight,
-            vaudio=vaudio,
-        )
-
-    def add_outro(self) -> bool:
-        """
-        Appends an outro video to the generated video summary if specified.
-
-        This method uses ffmpeg-python to concatenate the main summary video
-        (self.mp4sumpath) with the outro video (self.outro) and saves it
-        to self.mp4outpath.
-
-        Returns:
-            True if the outro was added successfully or if no outro was specified.
-            False if an error occurred during the process.
-        """
-        if (
-            not self.outro or not self.mp4sumpath or not self.mp4outpath
-        ):  # Should not happen if called correctly
-            logging.error(
-                "add_outro called with missing outro, mp4sumpath or mp4outpath"
-            )
-            return False
-
-        outro_meta = self._get_video_meta(self.outro)
+    def add_outro(self):
+        ometa, oseconds, owidth, oheight, oaudio = self._video_meta(self.outro)
         out = None
-        if outro_meta["success"]:
-            oaudio = outro_meta["vaudio"]  # Extract audio flag
-            ffmpeg_args: List[str] = [
+        if ometa:
+            ffmpeg_args = [
                 "-loglevel",
                 "error",
                 "-max_muxing_queue_size",
@@ -241,19 +131,16 @@ class PyHecateVideo:
         if out:
             try:
                 process = out.run_async(pipe_stdout=True, pipe_stderr=True)
-                _, serr = process.communicate()
-                if process.returncode != 0:
-                    logging.error(
-                        f"ffmpeg error when adding outro: {serr.decode('utf8')}"
-                    )
-                    if os.path.exists(self.mp4outpath):
-                        send2trash(self.mp4outpath)
-                    return False
-                return True
-            except Exception as e:  # Broad exception for ffmpeg execution issues
-                logging.error(f"Failed adding outro to {self.mp4sumpath}: {e}")
-                if self.mp4outpath and os.path.exists(self.mp4outpath):
+                sout, serr = process.communicate()
+                if serr:
+                    logging.error("ffmpeg error when adding outro:\n%s" % serr)
                     send2trash(self.mp4outpath)
+                    return False
+                else:
+                    return True
+            except:
+                logging.error("Failed adding outro to:\n%s" % self.mp4sumpath)
+                send2trash(self.mp4outpath)
                 return False
         else:
             logging.warning(
@@ -274,13 +161,7 @@ class PyHecateVideo:
             False if 'hecate' failed or was not found.
         """
         # Run hecate app
-        hecate_cmd: List[str] = [
-            "hecate",
-            "--in_video",
-            self.path,
-            "--out_dir",
-            self.outdir,
-        ]
+        hecate_cmd = ["hecate", "--in_video", self.path, "--out_dir", self.outdir]
         if self.vsum:
             hecate_cmd += [
                 "--generate_mov",
@@ -403,28 +284,11 @@ class PyHecateVideo:
                 shutil.move(self.mp4tmppath, self.mp4sumpath)
         return True
 
-    def summarize(self) -> bool:
-        """
-        Orchestrates the full video summarization process for the single video.
-
-        This involves:
-        1. Getting video metadata.
-        2. Preparing output folders.
-        3. Running 'hecate' to generate initial summaries/images.
-        4. Cleaning up and organizing generated files.
-        5. Adding an outro video if specified.
-
-        Returns:
-            True if the summarization process (excluding optional outro) completes successfully.
-            False if any critical step fails. Note that a failure in adding an
-            optional outro is logged as a warning but does not cause this method
-            to return False.
-        """
-        video_meta = self._get_video_meta(self.path)
-        if not video_meta["success"]:
-            logging.error(
-                f"Could not get video metadata for {self.path}. Aborting summarization."
-            )
+    def summarize(self):
+        self.vmeta, self.vseconds, self.vwidth, self.vheight, self.vaudio = (
+            self._video_meta(self.path)
+        )
+        if not self.vmeta:
             return False
 
         self.vmeta = video_meta[
@@ -458,168 +322,49 @@ class PyHecateVideo:
 
 
 class PyHecate:
-    """
-    Manages video processing tasks for single files or directories of video files.
-
-    This class identifies video files to process based on the input path and
-    mode (single file or directory). It then uses PyHecateVideo instances
-    to perform the actual processing for each identified video.
-    """
-
     def __init__(
         self,
-        path: str,
-        dir_mode: bool = False,  # Renamed 'dir' to 'dir_mode' to avoid conflict with os.path.dir
-        outdir: Optional[str] = None,
-        isumfreq: int = ISUMFREQ,
-        outro: Optional[str] = None,
-        vsum: bool = True,
-        isum: bool = True,
-        vsumlength: int = VSUMLENGTH,
-        gifwidth: int = GIFWIDTH,
-    ) -> None:
-        """
-        Initializes PyHecate to manage video processing tasks.
-
-        This constructor sets up paths and identifies videos to be processed.
-        Actual processing is deferred to the `execute()` method.
-
-        Args:
-            path: Path to the input video file or directory.
-            dir_mode: If True, `path` is treated as a directory of videos.
-                      Otherwise, `path` is treated as a single video file.
-            outdir: Optional path to a general output directory.
-                    If not provided, defaults to the parent of `path` (for single file)
-                    or `path` itself (for directory mode).
-                    Each video processed will have its own subfolder created within this
-                    main output directory.
-            isumfreq: Frequency in seconds for JPG snapshots.
-            vsumlength: Length of the video summary in seconds.
-            outro: Optional path to an outro video to append to summaries.
-            vsum: If True, generate video summaries.
-            isum: If True, generate image summaries (JPGs, GIFs).
-            gifwidth: Width of the generated GIFs in pixels.
-        """
-        self.path: str = path  # Store original path for execute method's logging
-        self.isumfreq: int = isumfreq
-        self.vsumlength: int = vsumlength
-        self.outro: Optional[str] = outro
-        self.vsum: bool = vsum
-        self.isum: bool = isum
-        self.gifwidth: int = gifwidth
-        self.vpaths: List[str] = []
-
-        if not os.path.exists(path):
-            logging.error(f"Input path does not exist: {path}")
-            # Consider raising an error here or handling it so __init__ doesn't partially succeed
-            return
-
-        abs_path: str = os.path.abspath(path)
-        if outdir:
-            self.outdir: str = os.path.abspath(outdir)
+        path=None,
+        dir=None,
+        outdir=None,
+        isumfreq=ISUMFREQ,
+        outro=None,
+        vsum=True,
+        isum=True,
+        vsumlength=VSUMLENGTH,
+        gifwidth=GIFWIDTH,
+    ):
+        self.isumfreq = isumfreq
+        self.vsumlength = vsumlength
+        self.outro = outro
+        self.vsum = vsum
+        self.isum = isum
+        self.gifwidth = gifwidth
+        self.vpaths = []
+        if not (os.path.exists(path)):
+            return False
+        if not outdir:
+            self.outdir = os.path.split(os.path.abspath(path))[0]
         else:
             self.outdir = os.path.split(abs_path)[0] if not dir_mode else abs_path
 
         if not os.path.exists(self.outdir):
             os.makedirs(self.outdir)
-
-        if dir_mode:
-            if not os.path.isdir(abs_path):
-                logging.error(
-                    f"Input path {abs_path} is not a directory, but --dir mode was specified."
-                )
-                return
+        if dir:
             self.vpaths = sorted(
-                [
-                    os.path.join(abs_path, p)
-                    for p in os.listdir(abs_path)
-                    if p.lower().endswith(".mp4")  # Consider other video formats?
-                ]
+                [os.path.abspath(p) for p in glob.glob(os.path.join(path, "*.mp4"))]
             )
-            if not self.vpaths:
-                logging.warning(f"No .mp4 files found in directory: {abs_path}")
         else:
-            if not os.path.isfile(abs_path):
-                logging.error(f"Input path {abs_path} is not a file.")
-                return
-            self.vpaths = [abs_path]
+            self.vpaths = [os.path.abspath(path)]
+        for vpath in self.vpaths:
+            self.summarize(vpath)
 
-        # Processing loop moved to execute() method
-
-    def execute(self) -> bool:
-        """
-        Processes all videos found during initialization.
-        Returns True if all videos were processed successfully (or no videos found),
-        False if any video failed or if initialization failed to find videos.
-        """
-        if not self.vpaths:
-            if os.path.exists(self.path):  # Path existed but no videos found
-                logging.warning(f"No videos to process in {self.path}.")
-            # If self.path didn't exist, error was logged in __init__ and vpaths is empty.
-            # In this case, it's an init failure, so return False.
-            # A more robust way might be to set a flag in __init__ if path validation failed.
-            # For now, empty vpaths after a valid path existed is not an error, but init failure is.
-            # Let's assume if __init__ logged an error for path, it's already "failed".
-            # This logic needs to be robust: if __init__ failed to set up self.path correctly,
-            # self.vpaths would be empty.
-            # A simple check: if self.vpaths is empty AND __init__ had issues setting up (e.g. path not found),
-            # then it's a failure. If path was valid but simply no .mp4s, it's not a failure.
-            # This distinction is tricky without an explicit success/failure flag from __init__.
-            # For now, if vpaths is empty, we'll consider it "nothing to do" unless path itself was bad.
-            # The original code in __init__ would log errors if path was bad and then vpaths would be empty.
-            # Let's refine this: if __init__ returned due to bad path, vpaths is empty.
-            # We need a way for PyHecate user to know if init itself was okay.
-            # One way: raise an exception from __init__ on critical errors.
-            # Or, add a status attribute.
-            # For now, let's assume if vpaths is empty, either no videos or init problem.
-            # The CLI will call this. If __init__ logs "Input path does not exist", then execute() will find empty vpaths.
-
-            # If self.path was invalid in __init__, it would have returned early.
-            # So, if we reach here and vpaths is empty, it means either the dir was empty
-            # or the single file was not a video (or not .mp4).
-            # This isn't necessarily an error for the execute() method itself.
-            # Let's return True indicating "executed, nothing to do or all done".
-            # The PyHecate class constructor already logs errors if input path is invalid.
-            return True  # No videos to process or successfully processed all.
-
-        all_successful = True
-        for vpath_item in self.vpaths:
-            if not self.process_video(vpath_item):
-                all_successful = False
-        return all_successful
-
-    def process_video(
-        self, vpath: str
-    ) -> bool:  # Renamed from summarize and changed to return bool
-        """
-        Processes a single video file using an instance of PyHecateVideo.
-
-        Args:
-            vpath: The absolute path to the video file to process.
-
-        Returns:
-            True if the video was processed successfully, False otherwise.
-        """
-        logging.info(f"\n\nProcessing: {vpath}")
-        dp: Tuple[str, str] = os.path.split(vpath)
-        video_name_without_ext: str = os.path.splitext(dp[1])[0]
-
-        # Determine specific output directory for this video
-        # If processing a single file, outdir for PyHecate might be the parent of the video file.
-        # The video-specific output should be a subfolder within that.
-        # If processing a directory, self.outdir is that directory.
-        # Individual video outputs should still go into subfolders.
-
-        # If original outdir was, e.g. /path/to/videos/
-        # and video is /path/to/videos/video1.mp4
-        # then voutdir becomes /path/to/videos/video1/
-        # If original outdir was /path/to/custom_output/
-        # and video is /path/to/videos/video1.mp4
-        # then voutdir becomes /path/to/custom_output/video1/
-
-        voutdir: str = os.path.join(self.outdir, video_name_without_ext)
-
-        pyh_video = PyHecateVideo(
+    def summarize(self, vpath):
+        logging.info("\n\nProcessing:\n%s" % (vpath))
+        time.sleep(1)
+        dp = os.path.split(vpath)
+        voutdir = os.path.join(self.outdir, os.path.splitext(dp[1])[0])
+        pyh = PyHecateVideo(
             path=vpath,
             outdir=voutdir,
             isumfreq=self.isumfreq,
@@ -629,7 +374,5 @@ class PyHecate:
             isum=self.isum,
             gifwidth=self.gifwidth,
         )
-        if not pyh_video.summarize():
-            logging.error(f"Processing failed for: {vpath}")
-            return False
-        return True
+        if not pyh.summarize():
+            logging.error("Processing failed:\n%s" % (vpath))

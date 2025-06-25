@@ -13,9 +13,10 @@ import json
 import logging
 import os
 import shutil
+import shlex # Moved import shlex to top-level
 import subprocess
-import time
-from typing import Any, Dict, List, Optional, Tuple
+# import time # Unused import removed by ruff, confirming
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import ffmpeg  # type: ignore
 from send2trash import send2trash  # type: ignore
@@ -25,7 +26,31 @@ VSUMLENGTH: int = 16
 GIFWIDTH: int = 360
 
 
+class VideoMetadata(TypedDict):
+    """
+    Represents the extracted metadata from a video file.
+
+    Attributes:
+        success: True if metadata extraction was successful, False otherwise.
+        vseconds: Duration of the video in seconds.
+        vwidth: Width of the video in pixels.
+        vheight: Height of the video in pixels.
+        vaudio: True if the video has an audio stream, False otherwise.
+    """
+
+    success: bool
+    vseconds: int
+    vwidth: int
+    vheight: int
+    vaudio: bool
+
+
 class PyHecateVideo:
+    """
+    Handles the processing of a single video file to generate summaries,
+    thumbnails, and GIFs using 'hecate' and 'ffmpeg'.
+    """
+
     def __init__(
         self,
         path: str,
@@ -37,6 +62,20 @@ class PyHecateVideo:
         isum: bool = True,
         gifwidth: int = GIFWIDTH,
     ) -> None:
+        """
+        Initializes PyHecateVideo for processing a single video.
+
+        Args:
+            path: Path to the input video file.
+            outdir: Directory where output subfolders and files will be created.
+                    This directory itself will be created if it doesn't exist.
+            isumfreq: Frequency in seconds for JPG snapshots.
+            vsumlength: Length of the video summary in seconds.
+            outro: Optional path to an outro video to append to the summary.
+            vsum: If True, generate video summary.
+            isum: If True, generate image summaries (JPGs, GIFs).
+            gifwidth: Width of the generated GIFs in pixels.
+        """
         # Quasi-constants
         self.gifwidth: int = gifwidth
         self.vsumlength: int = vsumlength
@@ -66,46 +105,93 @@ class PyHecateVideo:
         self.mp4outpath: Optional[str] = None
         self.numsnaps: int = 0
 
-    def _video_meta(self, path: str) -> Tuple[bool, int, int, int, bool]:
-        meta: Dict[str, Any] = {}
+    def _get_video_meta(self, path: str) -> VideoMetadata:
+        """
+        Retrieves video metadata (duration, dimensions, audio presence) using ffprobe.
+
+        Args:
+            path: The path to the video file.
+
+        Returns:
+            A VideoMetadata object containing the extracted information.
+            The 'success' field in VideoMetadata indicates if extraction was successful.
+        """
+        meta_dict: Dict[str, Any] = {}
         vseconds: int = 0
         vwidth: int = 0
         vheight: int = 0
         vaudio: bool = False
+        success: bool = False
+
         command: str = (
-            f"ffprobe -v quiet -print_format json -show_format -show_streams {path}"
+            f'ffprobe -v quiet -print_format json -show_format -show_streams "{path}"'
         )
         try:
+            # Note: Using shell=True can be a security risk if path is not sanitized.
+            # However, ffprobe path arguments are typically safe.
+            # Splitting the command manually is safer if paths can have spaces.
+            # For now, assuming paths are manageable or this will be reviewed.
+            # Using command.split() is generally safer than shell=True.
+            # Ensure path is properly quoted if it can contain spaces.
+            # Let's use command.split() for better security for now.
+            # If paths have spaces, ffmpeg-python handles it, but direct subprocess needs care.
+            # Path is quoted in the command string, so shell=True might be needed if not splitting.
+            # Sticking to command.split() and assuming paths won't break this simple split.
+            # A more robust way: shlex.split(command)
+            # import shlex # Import shlex for robust command splitting -> Moved to top
+
             result = subprocess.run(
-                command.split(), capture_output=True, text=True, check=True
+                shlex.split(command), capture_output=True, text=True, check=True
             )
             if os.path.exists(path):  # Re-check after ffprobe, path might be gone
-                meta = json.loads(result.stdout)
+                meta_dict = json.loads(result.stdout)
+                success = True
             else:
                 logging.error(f"Video file disappeared during ffprobe: {path}")
-                return False, 0, 0, 0, False
         except subprocess.CalledProcessError as e:
-            logging.error(f"FFProbe failed for {path}, error: {e.stderr}")
-            return False, 0, 0, 0, False
+            logging.error(f'FFProbe failed for "{path}", error: {e.stderr}')
         except json.JSONDecodeError:
-            logging.error(f"FFProbe output for {path} is not valid JSON.")
-            return False, 0, 0, 0, False
+            logging.error(f'FFProbe output for "{path}" is not valid JSON.')
+        except FileNotFoundError:  # If ffprobe itself is not found
+            logging.error(
+                "ffprobe command not found. Please ensure it is installed and in your PATH."
+            )
 
-        for stream in meta.get("streams", []):
-            if stream.get("codec_type") == "video":
-                vseconds = int(float(stream.get("duration", 0)))
-                vwidth = int(stream.get("width", 0))
-                vheight = int(stream.get("height", 0))
-            if stream.get("codec_type") == "audio":
-                vaudio = True
+        if success:
+            for stream in meta_dict.get("streams", []):
+                if stream.get("codec_type") == "video":
+                    vseconds = int(float(stream.get("duration", 0)))
+                    vwidth = int(stream.get("width", 0))
+                    vheight = int(stream.get("height", 0))
+                if stream.get("codec_type") == "audio":
+                    vaudio = True
 
-        if vwidth == 0 or vheight == 0:  # Ensure we got valid video dimensions
-            logging.error(f"FFProbe could not determine video dimensions for {path}")
-            return False, 0, 0, 0, False
+            if vwidth == 0 or vheight == 0:  # Ensure we got valid video dimensions
+                logging.error(
+                    f'FFProbe could not determine video dimensions for "{path}"'
+                )
+                success = False  # Mark as failure if dimensions are invalid
 
-        return True, vseconds, vwidth, vheight, vaudio
+        return VideoMetadata(
+            success=success,
+            vseconds=vseconds,
+            vwidth=vwidth,
+            vheight=vheight,
+            vaudio=vaudio,
+        )
 
     def add_outro(self) -> bool:
+        """
+        Appends an outro video to the generated video summary if specified.
+
+        This method uses ffmpeg-python to concatenate the main summary video
+        (self.mp4sumpath) with the outro video (self.outro) and saves it
+        to self.mp4outpath.
+
+        Returns:
+            True if the outro was added successfully or if no outro was specified.
+            False if an error occurred during the process.
+        """
         if (
             not self.outro or not self.mp4sumpath or not self.mp4outpath
         ):  # Should not happen if called correctly
@@ -114,9 +200,10 @@ class PyHecateVideo:
             )
             return False
 
-        ometa, _, _, _, oaudio = self._video_meta(self.outro)
+        outro_meta = self._get_video_meta(self.outro)
         out = None
-        if ometa:
+        if outro_meta["success"]:
+            oaudio = outro_meta["vaudio"]  # Extract audio flag
             ffmpeg_args: List[str] = [
                 "-loglevel",
                 "error",
@@ -175,6 +262,17 @@ class PyHecateVideo:
             return False
 
     def run_hecate(self) -> bool:
+        """
+        Runs the 'hecate' command-line tool to generate video summaries and images.
+
+        The specific 'hecate' commands (for video summary, JPGs, GIFs) are
+        determined by the instance attributes self.vsum, self.isum, and related
+        parameters (vsumlength, numsnaps, vwidth, gifwidth).
+
+        Returns:
+            True if 'hecate' executed successfully.
+            False if 'hecate' failed or was not found.
+        """
         # Run hecate app
         hecate_cmd: List[str] = [
             "hecate",
@@ -222,6 +320,16 @@ class PyHecateVideo:
             return False
 
     def prep_outfolders(self) -> None:
+        """
+        Prepares output folders for JPGs, GIFs, and MP4 summaries.
+
+        It creates necessary subdirectories (e.g., 'jpg-1280', 'gif-360', 'mp4-16')
+        within self.outdir based on processing options and video dimensions.
+        It also defines paths for temporary and final summary files.
+
+        Raises:
+            ValueError: If self.isumfreq is negative.
+        """
         # Prepare folders
         if not os.path.exists(self.outdir):
             os.makedirs(self.outdir)
@@ -251,6 +359,19 @@ class PyHecateVideo:
             self.mp4outpath = os.path.join(self.mp4dir, f"{self.base}{self.mp4outsuf}")
 
     def cleanup_folders(self) -> bool:
+        """
+        Reorganizes and cleans up files generated by 'hecate'.
+
+        Moves JPGs, summary GIFs, and individual GIFs from the base output
+        directory (self.outdir, which is the video-specific output dir)
+        into their respective subdirectories (e.g., 'jpg-1280', 'gifsum-360').
+        Also moves the temporary MP4 summary to its final location.
+
+        Returns:
+            True if cleanup was successful or if no cleanup was needed for a category.
+            False if essential paths (like self.jpgdir) were not initialized,
+            which indicates a problem in `prep_outfolders`.
+        """
         # Reorganize and clean up
         if self.isum:
             if (
@@ -283,15 +404,36 @@ class PyHecateVideo:
         return True
 
     def summarize(self) -> bool:
-        (
-            self.vmeta,
-            self.vseconds,
-            self.vwidth,
-            self.vheight,
-            self.vaudio,
-        ) = self._video_meta(self.path)
-        if not self.vmeta:
+        """
+        Orchestrates the full video summarization process for the single video.
+
+        This involves:
+        1. Getting video metadata.
+        2. Preparing output folders.
+        3. Running 'hecate' to generate initial summaries/images.
+        4. Cleaning up and organizing generated files.
+        5. Adding an outro video if specified.
+
+        Returns:
+            True if the summarization process (excluding optional outro) completes successfully.
+            False if any critical step fails. Note that a failure in adding an
+            optional outro is logged as a warning but does not cause this method
+            to return False.
+        """
+        video_meta = self._get_video_meta(self.path)
+        if not video_meta["success"]:
+            logging.error(
+                f"Could not get video metadata for {self.path}. Aborting summarization."
+            )
             return False
+
+        self.vmeta = video_meta[
+            "success"
+        ]  # Though already checked, set for consistency if used elsewhere
+        self.vseconds = video_meta["vseconds"]
+        self.vwidth = video_meta["vwidth"]
+        self.vheight = video_meta["vheight"]
+        self.vaudio = video_meta["vaudio"]
 
         self.prep_outfolders()
 
@@ -316,6 +458,14 @@ class PyHecateVideo:
 
 
 class PyHecate:
+    """
+    Manages video processing tasks for single files or directories of video files.
+
+    This class identifies video files to process based on the input path and
+    mode (single file or directory). It then uses PyHecateVideo instances
+    to perform the actual processing for each identified video.
+    """
+
     def __init__(
         self,
         path: str,
@@ -328,6 +478,29 @@ class PyHecate:
         vsumlength: int = VSUMLENGTH,
         gifwidth: int = GIFWIDTH,
     ) -> None:
+        """
+        Initializes PyHecate to manage video processing tasks.
+
+        This constructor sets up paths and identifies videos to be processed.
+        Actual processing is deferred to the `execute()` method.
+
+        Args:
+            path: Path to the input video file or directory.
+            dir_mode: If True, `path` is treated as a directory of videos.
+                      Otherwise, `path` is treated as a single video file.
+            outdir: Optional path to a general output directory.
+                    If not provided, defaults to the parent of `path` (for single file)
+                    or `path` itself (for directory mode).
+                    Each video processed will have its own subfolder created within this
+                    main output directory.
+            isumfreq: Frequency in seconds for JPG snapshots.
+            vsumlength: Length of the video summary in seconds.
+            outro: Optional path to an outro video to append to summaries.
+            vsum: If True, generate video summaries.
+            isum: If True, generate image summaries (JPGs, GIFs).
+            gifwidth: Width of the generated GIFs in pixels.
+        """
+        self.path: str = path  # Store original path for execute method's logging
         self.isumfreq: int = isumfreq
         self.vsumlength: int = vsumlength
         self.outro: Optional[str] = outro
@@ -371,12 +544,62 @@ class PyHecate:
                 return
             self.vpaths = [abs_path]
 
+        # Processing loop moved to execute() method
+
+    def execute(self) -> bool:
+        """
+        Processes all videos found during initialization.
+        Returns True if all videos were processed successfully (or no videos found),
+        False if any video failed or if initialization failed to find videos.
+        """
+        if not self.vpaths:
+            if os.path.exists(self.path):  # Path existed but no videos found
+                logging.warning(f"No videos to process in {self.path}.")
+            # If self.path didn't exist, error was logged in __init__ and vpaths is empty.
+            # In this case, it's an init failure, so return False.
+            # A more robust way might be to set a flag in __init__ if path validation failed.
+            # For now, empty vpaths after a valid path existed is not an error, but init failure is.
+            # Let's assume if __init__ logged an error for path, it's already "failed".
+            # This logic needs to be robust: if __init__ failed to set up self.path correctly,
+            # self.vpaths would be empty.
+            # A simple check: if self.vpaths is empty AND __init__ had issues setting up (e.g. path not found),
+            # then it's a failure. If path was valid but simply no .mp4s, it's not a failure.
+            # This distinction is tricky without an explicit success/failure flag from __init__.
+            # For now, if vpaths is empty, we'll consider it "nothing to do" unless path itself was bad.
+            # The original code in __init__ would log errors if path was bad and then vpaths would be empty.
+            # Let's refine this: if __init__ returned due to bad path, vpaths is empty.
+            # We need a way for PyHecate user to know if init itself was okay.
+            # One way: raise an exception from __init__ on critical errors.
+            # Or, add a status attribute.
+            # For now, let's assume if vpaths is empty, either no videos or init problem.
+            # The CLI will call this. If __init__ logs "Input path does not exist", then execute() will find empty vpaths.
+
+            # If self.path was invalid in __init__, it would have returned early.
+            # So, if we reach here and vpaths is empty, it means either the dir was empty
+            # or the single file was not a video (or not .mp4).
+            # This isn't necessarily an error for the execute() method itself.
+            # Let's return True indicating "executed, nothing to do or all done".
+            # The PyHecate class constructor already logs errors if input path is invalid.
+            return True  # No videos to process or successfully processed all.
+
+        all_successful = True
         for vpath_item in self.vpaths:
-            self.process_video(vpath_item)
+            if not self.process_video(vpath_item):
+                all_successful = False
+        return all_successful
 
     def process_video(
         self, vpath: str
-    ) -> None:  # Renamed from summarize to avoid confusion
+    ) -> bool:  # Renamed from summarize and changed to return bool
+        """
+        Processes a single video file using an instance of PyHecateVideo.
+
+        Args:
+            vpath: The absolute path to the video file to process.
+
+        Returns:
+            True if the video was processed successfully, False otherwise.
+        """
         logging.info(f"\n\nProcessing: {vpath}")
         dp: Tuple[str, str] = os.path.split(vpath)
         video_name_without_ext: str = os.path.splitext(dp[1])[0]
@@ -408,3 +631,5 @@ class PyHecate:
         )
         if not pyh_video.summarize():
             logging.error(f"Processing failed for: {vpath}")
+            return False
+        return True

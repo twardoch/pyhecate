@@ -1,0 +1,1226 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+pyhecate/
+  __init__.py
+  __main__.py
+tests/
+  test_pyhecate_video.py
+.gitignore
+LICENSE
+pyproject.toml
+pytest.ini
+README.md
+requirements.txt
+setup.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="pyhecate/__init__.py">
+#!/usr/bin/env python3
+"""
+pyhecate
+--------
+Copyright (c) 2021 Adam Twardoch <adam+github@twardoch.com>
+MIT license. Python 3.8+
+"""
+
+__all__ = ["__main__"]
+
+import glob
+import json
+import logging
+import os
+import shutil
+import subprocess
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+import ffmpeg  # type: ignore
+from send2trash import send2trash  # type: ignore
+
+ISUMFREQ: int = 30
+VSUMLENGTH: int = 16
+GIFWIDTH: int = 360
+
+
+class PyHecateVideo:
+    def __init__(
+        self,
+        path: str,
+        outdir: str,
+        isumfreq: int = ISUMFREQ,
+        vsumlength: int = VSUMLENGTH,
+        outro: Optional[str] = None,
+        vsum: bool = True,
+        isum: bool = True,
+        gifwidth: int = GIFWIDTH,
+    ) -> None:
+        # Quasi-constants
+        self.gifwidth: int = gifwidth
+        self.vsumlength: int = vsumlength
+        self.mp4sumsuf: str = f"_sum-{vsumlength}.mp4"
+        self.mp4outsuf: str = f"_outsum-{vsumlength}.mp4"
+        # Params
+        self.path: str = path
+        self.outdir: str = outdir
+        if not os.path.exists(self.outdir):
+            os.makedirs(self.outdir)
+        self.base: str = os.path.split(self.outdir)[1]
+        self.isumfreq: int = isumfreq
+        self.outro: Optional[str] = outro
+        self.vsum: bool = vsum
+        self.isum: bool = isum
+        self.vseconds: int = 0
+        self.vwidth: int = 0
+        self.vheight: int = 0
+        self.vaudio: bool = False
+        self.vmeta: bool = False
+        self.jpgdir: Optional[str] = None
+        self.gifdir: Optional[str] = None
+        self.gifsumdir: Optional[str] = None
+        self.mp4dir: Optional[str] = None
+        self.mp4sumpath: Optional[str] = None
+        self.mp4tmppath: Optional[str] = None
+        self.mp4outpath: Optional[str] = None
+        self.numsnaps: int = 0
+
+    def _video_meta(self, path: str) -> Tuple[bool, int, int, int, bool]:
+        meta: Dict[str, Any] = {}
+        vseconds: int = 0
+        vwidth: int = 0
+        vheight: int = 0
+        vaudio: bool = False
+        command: str = (
+            f"ffprobe -v quiet -print_format json -show_format -show_streams {path}"
+        )
+        try:
+            result = subprocess.run(
+                command.split(), capture_output=True, text=True, check=True
+            )
+            if os.path.exists(path):  # Re-check after ffprobe, path might be gone
+                meta = json.loads(result.stdout)
+            else:
+                logging.error(f"Video file disappeared during ffprobe: {path}")
+                return False, 0, 0, 0, False
+        except subprocess.CalledProcessError as e:
+            logging.error(f"FFProbe failed for {path}, error: {e.stderr}")
+            return False, 0, 0, 0, False
+        except json.JSONDecodeError:
+            logging.error(f"FFProbe output for {path} is not valid JSON.")
+            return False, 0, 0, 0, False
+
+        for stream in meta.get("streams", []):
+            if stream.get("codec_type") == "video":
+                vseconds = int(float(stream.get("duration", 0)))
+                vwidth = int(stream.get("width", 0))
+                vheight = int(stream.get("height", 0))
+            if stream.get("codec_type") == "audio":
+                vaudio = True
+
+        if vwidth == 0 or vheight == 0:  # Ensure we got valid video dimensions
+            logging.error(f"FFProbe could not determine video dimensions for {path}")
+            return False, 0, 0, 0, False
+
+        return True, vseconds, vwidth, vheight, vaudio
+
+    def add_outro(self) -> bool:
+        if (
+            not self.outro or not self.mp4sumpath or not self.mp4outpath
+        ):  # Should not happen if called correctly
+            logging.error(
+                "add_outro called with missing outro, mp4sumpath or mp4outpath"
+            )
+            return False
+
+        ometa, _, _, _, oaudio = self._video_meta(self.outro)
+        out = None
+        if ometa:
+            ffmpeg_args: List[str] = [
+                "-loglevel",
+                "error",
+                "-max_muxing_queue_size",
+                "9999",
+                "-nostdin",
+                "-y",
+            ]
+            try:
+                in1 = ffmpeg.input(self.mp4sumpath)
+                in2 = ffmpeg.input(self.outro)
+                v1 = in1.video
+                v2 = in2.video
+                if self.vaudio and oaudio:
+                    a1 = in1.audio
+                    a2 = in2.audio
+                    joined = ffmpeg.concat(v1, a1, v2, a2, v=1, a=1).node
+                    v3 = joined[0]
+                    a3 = joined[1]
+                    out = ffmpeg.output(v3, a3, self.mp4outpath).global_args(
+                        *ffmpeg_args
+                    )
+                else:
+                    joined = ffmpeg.concat(v1, v2, v=1).node
+                    v3 = joined[0]
+                    out = ffmpeg.output(v3, self.mp4outpath).global_args(*ffmpeg_args)
+            except ffmpeg.Error as e:
+                logging.error(
+                    f"ffmpeg error during input/concat setup for outro: {e.stderr.decode('utf8') if e.stderr else e}"
+                )
+                if self.mp4outpath and os.path.exists(self.mp4outpath):
+                    send2trash(self.mp4outpath)
+                return False
+
+        if out:
+            try:
+                process = out.run_async(pipe_stdout=True, pipe_stderr=True)
+                _, serr = process.communicate()
+                if process.returncode != 0:
+                    logging.error(
+                        f"ffmpeg error when adding outro: {serr.decode('utf8')}"
+                    )
+                    if os.path.exists(self.mp4outpath):
+                        send2trash(self.mp4outpath)
+                    return False
+                return True
+            except Exception as e:  # Broad exception for ffmpeg execution issues
+                logging.error(f"Failed adding outro to {self.mp4sumpath}: {e}")
+                if self.mp4outpath and os.path.exists(self.mp4outpath):
+                    send2trash(self.mp4outpath)
+                return False
+        else:
+            logging.warning(
+                f"Could not process outro video {self.outro} or main summary video."
+            )
+            return False
+
+    def run_hecate(self) -> bool:
+        # Run hecate app
+        hecate_cmd: List[str] = [
+            "hecate",
+            "--in_video",
+            self.path,
+            "--out_dir",
+            self.outdir,
+        ]
+        if self.vsum:
+            hecate_cmd += [
+                "--generate_mov",
+                "--lmov",
+                str(self.vsumlength),
+                "--mov_width_px",
+                str(self.vwidth),
+            ]
+        if self.isum:
+            hecate_cmd += [
+                "--generate_jpg",
+                "--njpg",
+                str(self.numsnaps),
+                "--jpg_width_px",
+                str(self.vwidth),
+                "--generate_gifall",
+                "--generate_gifsum",
+                "--ngif",
+                str(self.numsnaps),
+                "--gif_width_px",
+                str(self.gifwidth),
+            ]
+        logging.debug(f"Running hecate with: {' '.join(hecate_cmd)}")
+        try:
+            result = subprocess.run(
+                hecate_cmd, capture_output=True, text=True, check=True
+            )
+            logging.debug(f"Hecate output: {result.stdout}")
+            return True
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Hecate failed for {self.path}: {e.stderr}")
+            return False
+        except FileNotFoundError:
+            logging.error(
+                "Hecate command not found. Please ensure it is installed and in your PATH."
+            )
+            return False
+
+    def prep_outfolders(self) -> None:
+        # Prepare folders
+        if not os.path.exists(self.outdir):
+            os.makedirs(self.outdir)
+        if self.isumfreq < 0:
+            raise ValueError("isumfreq must be non-negative")
+        self.numsnaps = (
+            max(int(self.vseconds / self.isumfreq), 10) if self.isumfreq > 0 else 10
+        )
+        if self.isum:
+            self.jpgdir = os.path.join(self.outdir, f"jpg-{self.vwidth}")
+            if not os.path.exists(self.jpgdir):
+                os.makedirs(self.jpgdir)
+            self.gifdir = os.path.join(self.outdir, f"gif-{self.gifwidth}")
+            if not os.path.exists(self.gifdir):
+                os.makedirs(self.gifdir)
+            self.gifsumdir = os.path.join(self.outdir, f"gifsum-{self.gifwidth}")
+            if not os.path.exists(self.gifsumdir):
+                os.makedirs(self.gifsumdir)
+        if self.vsum:
+            self.mp4dir = os.path.join(self.outdir, f"mp4-{self.vsumlength}")
+            if not os.path.exists(self.mp4dir):
+                os.makedirs(self.mp4dir)
+            self.mp4tmppath = os.path.join(self.outdir, f"{self.base}_sum.mp4")
+            if os.path.exists(self.mp4tmppath):
+                send2trash(self.mp4tmppath)
+            self.mp4sumpath = os.path.join(self.mp4dir, f"{self.base}{self.mp4sumsuf}")
+            self.mp4outpath = os.path.join(self.mp4dir, f"{self.base}{self.mp4outsuf}")
+
+    def cleanup_folders(self) -> bool:
+        # Reorganize and clean up
+        if self.isum:
+            if (
+                not self.jpgdir or not self.gifdir or not self.gifsumdir
+            ):  # Should be set in prep_outfolders
+                logging.error(
+                    "Image output directories not initialized in cleanup_folders."
+                )
+                return False
+            jpgs: List[str] = glob.glob(os.path.join(self.outdir, "*.jpg"))
+            for jpg in jpgs:
+                dest: str = os.path.join(self.jpgdir, os.path.split(jpg)[1])
+                shutil.move(jpg, dest)
+            gifsumpath: str = os.path.join(self.outdir, f"{self.base}_sum.gif")
+            if os.path.exists(gifsumpath):
+                dest = os.path.join(self.gifsumdir, os.path.split(gifsumpath)[1])
+                shutil.move(gifsumpath, dest)
+            gifs: List[str] = glob.glob(os.path.join(self.outdir, "*.gif"))
+            for gif in gifs:
+                dest = os.path.join(self.gifdir, os.path.split(gif)[1])
+                shutil.move(gif, dest)
+        if self.vsum:
+            if (
+                not self.mp4tmppath or not self.mp4sumpath
+            ):  # Should be set in prep_outfolders
+                logging.error("Video output paths not initialized in cleanup_folders.")
+                return False
+            if os.path.exists(self.mp4tmppath):
+                shutil.move(self.mp4tmppath, self.mp4sumpath)
+        return True
+
+    def summarize(self) -> bool:
+        (
+            self.vmeta,
+            self.vseconds,
+            self.vwidth,
+            self.vheight,
+            self.vaudio,
+        ) = self._video_meta(self.path)
+        if not self.vmeta:
+            return False
+
+        self.prep_outfolders()
+
+        if not self.run_hecate():
+            return False
+
+        if not self.cleanup_folders():
+            return False
+
+        if (
+            self.vsum
+            and self.outro
+            and os.path.exists(self.outro)
+            and self.mp4sumpath
+            and os.path.exists(self.mp4sumpath)
+        ):
+            if not self.add_outro():
+                # Logged in add_outro, but we might want to indicate failure source
+                logging.warning(f"Failed to add outro to {self.path}")
+                # Depending on desired behavior, this could be a hard False or just a warning
+        return True
+
+
+class PyHecate:
+    def __init__(
+        self,
+        path: str,
+        dir_mode: bool = False,  # Renamed 'dir' to 'dir_mode' to avoid conflict with os.path.dir
+        outdir: Optional[str] = None,
+        isumfreq: int = ISUMFREQ,
+        outro: Optional[str] = None,
+        vsum: bool = True,
+        isum: bool = True,
+        vsumlength: int = VSUMLENGTH,
+        gifwidth: int = GIFWIDTH,
+    ) -> None:
+        self.isumfreq: int = isumfreq
+        self.vsumlength: int = vsumlength
+        self.outro: Optional[str] = outro
+        self.vsum: bool = vsum
+        self.isum: bool = isum
+        self.gifwidth: int = gifwidth
+        self.vpaths: List[str] = []
+
+        if not os.path.exists(path):
+            logging.error(f"Input path does not exist: {path}")
+            # Consider raising an error here or handling it so __init__ doesn't partially succeed
+            return
+
+        abs_path: str = os.path.abspath(path)
+        if outdir:
+            self.outdir: str = os.path.abspath(outdir)
+        else:
+            self.outdir = os.path.split(abs_path)[0] if not dir_mode else abs_path
+
+        if not os.path.exists(self.outdir):
+            os.makedirs(self.outdir)
+
+        if dir_mode:
+            if not os.path.isdir(abs_path):
+                logging.error(
+                    f"Input path {abs_path} is not a directory, but --dir mode was specified."
+                )
+                return
+            self.vpaths = sorted(
+                [
+                    os.path.join(abs_path, p)
+                    for p in os.listdir(abs_path)
+                    if p.lower().endswith(".mp4")  # Consider other video formats?
+                ]
+            )
+            if not self.vpaths:
+                logging.warning(f"No .mp4 files found in directory: {abs_path}")
+        else:
+            if not os.path.isfile(abs_path):
+                logging.error(f"Input path {abs_path} is not a file.")
+                return
+            self.vpaths = [abs_path]
+
+        for vpath_item in self.vpaths:
+            self.process_video(vpath_item)
+
+    def process_video(
+        self, vpath: str
+    ) -> None:  # Renamed from summarize to avoid confusion
+        logging.info(f"\n\nProcessing: {vpath}")
+        dp: Tuple[str, str] = os.path.split(vpath)
+        video_name_without_ext: str = os.path.splitext(dp[1])[0]
+
+        # Determine specific output directory for this video
+        # If processing a single file, outdir for PyHecate might be the parent of the video file.
+        # The video-specific output should be a subfolder within that.
+        # If processing a directory, self.outdir is that directory.
+        # Individual video outputs should still go into subfolders.
+
+        # If original outdir was, e.g. /path/to/videos/
+        # and video is /path/to/videos/video1.mp4
+        # then voutdir becomes /path/to/videos/video1/
+        # If original outdir was /path/to/custom_output/
+        # and video is /path/to/videos/video1.mp4
+        # then voutdir becomes /path/to/custom_output/video1/
+
+        voutdir: str = os.path.join(self.outdir, video_name_without_ext)
+
+        pyh_video = PyHecateVideo(
+            path=vpath,
+            outdir=voutdir,
+            isumfreq=self.isumfreq,
+            vsumlength=self.vsumlength,
+            outro=self.outro,
+            vsum=self.vsum,
+            isum=self.isum,
+            gifwidth=self.gifwidth,
+        )
+        if not pyh_video.summarize():
+            logging.error(f"Processing failed for: {vpath}")
+</file>
+
+<file path="pyhecate/__main__.py">
+#!/usr/bin/env python3
+"""
+PyHecate Command Line Interface
+"""
+
+import logging
+import sys  # For accessing version in Python 3.8+
+from argparse import ArgumentParser, Namespace
+from importlib.metadata import version as get_version
+from typing import Any, Dict
+
+import pyhecate
+
+APP_VERSION = get_version("pyhecate")
+
+
+def cli() -> ArgumentParser:
+    parser = ArgumentParser(prog="pyhecate")
+
+    path_group = parser.add_argument_group("paths and folders")
+    path_group.add_argument(
+        "path", metavar="path", type=str, help="path to video file or directory"
+    )
+    path_group.add_argument(
+        "-d",
+        "--dir",
+        dest="dir_mode",  # Changed from 'dir' to 'dir_mode'
+        action="store_true",
+        help="input path is a folder with video files",
+    )
+    path_group.add_argument(
+        "-o",
+        "--outdir",
+        dest="outdir",
+        metavar="output_folder",
+        type=str,
+        help="output folder for created subfolders (defaults to input path parent or input path itself if --dir)",
+    )
+
+    image_group = parser.add_argument_group("make images")
+    image_group.add_argument(
+        "-i",
+        "--image-every",
+        dest="isumfreq",
+        metavar="secs",
+        default=pyhecate.ISUMFREQ,
+        type=int,
+        help=f"JPG snapshot frequency in seconds (default: {pyhecate.ISUMFREQ})",
+    )
+    image_group.add_argument(
+        "-g",
+        "--gif-width",
+        dest="gifwidth",
+        metavar="px",
+        default=pyhecate.GIFWIDTH,
+        type=int,
+        help=f"GIF width (default: {pyhecate.GIFWIDTH})",
+    )
+    image_group.add_argument(
+        "-I",
+        "--skip-images",
+        dest="isum",
+        action="store_false",
+        help="skip making JPG & GIF images",
+    )
+
+    video_group = parser.add_argument_group("make video summary")
+    video_group.add_argument(
+        "-s",
+        "--video-length",
+        dest="vsumlength",
+        metavar="secs",
+        default=pyhecate.VSUMLENGTH,
+        type=int,
+        help=f"video summary length in seconds (default: {pyhecate.VSUMLENGTH})",
+    )
+    video_group.add_argument(
+        "-a",
+        "--outro",
+        dest="outro",
+        metavar="path_to_outro_video",
+        type=str,
+        help="append outro video to summary video",
+    )
+    video_group.add_argument(
+        "-S",
+        "--skip-video-summary",
+        dest="vsum",
+        action="store_false",
+        help="skip making the video summary MP4 file",
+    )
+
+    other_group = parser.add_argument_group("other")
+    other_group.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=1,
+        help="-v show progress (INFO), -vv show debug (DEBUG)",
+    )
+    other_group.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {APP_VERSION}",
+        help="show version and exit",
+    )
+
+    return parser
+
+
+def main(
+    *args: Any, **kwargs: Any
+) -> None:  # Added type hints for args/kwargs though they are not used
+    arg_parser = cli()
+    opts: Namespace = arg_parser.parse_args()
+
+    # Configure logging
+    log_level: int = logging.WARNING  # Default
+    if opts.verbose == 1:
+        log_level = logging.INFO
+    elif opts.verbose >= 2:
+        log_level = logging.DEBUG
+
+    # For verbosity = 0 (e.g. if default was 0 and no -v given), it could be logging.ERROR or logging.CRITICAL
+    # Current default is 1, so -v (opts.verbose=2) -> DEBUG, no flag (opts.verbose=1) -> INFO
+    # If user provides -q or similar for less verbosity, that could be handled here too.
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Prepare options for PyHecate class
+    # The 'dir' argument was renamed to 'dir_mode' in PyHecate class and CLI arguments
+    # to avoid conflict with any potential 'dir' variable or built-in.
+    pyhecate_opts: Dict[str, Any] = {
+        "path": opts.path,
+        "dir_mode": opts.dir_mode,  # Ensure this matches the class's expected argument name
+        "outdir": opts.outdir,
+        "isumfreq": opts.isumfreq,
+        "outro": opts.outro,
+        "vsum": opts.vsum,
+        "isum": opts.isum,
+        "vsumlength": opts.vsumlength,
+        "gifwidth": opts.gifwidth,
+    }
+
+    logging.debug(f"Running with options: {pyhecate_opts}")
+
+    # Instantiate and run PyHecate
+    try:
+        _ = pyhecate.PyHecate(**pyhecate_opts)
+        # If PyHecate.__init__ can fail and return None or raise specific exceptions, handle here.
+        # For now, assume it either completes or logs errors internally.
+        # If there's a main processing method in PyHecate that needs to be called after init, do it here.
+        # Based on current PyHecate, processing starts in __init__.
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="tests/test_pyhecate_video.py">
+import pytest
+import os
+import pyhecate # Import the main module
+from pyhecate import PyHecateVideo, ISUMFREQ, VSUMLENGTH, GIFWIDTH
+from unittest.mock import patch, MagicMock
+
+# Define a fixture for a temporary output directory
+@pytest.fixture
+def temp_outdir(tmp_path):
+    d = tmp_path / "output"
+    d.mkdir()
+    return str(d)
+
+# Test basic instantiation of PyHecateVideo
+def test_pyhecate_video_instantiation(temp_outdir):
+    """Test that PyHecateVideo can be instantiated."""
+    video_path = "dummy.mp4"  # Dummy path, file doesn't need to exist for this test
+
+    # Create a dummy video file for os.path.exists checks if needed by constructor logic
+    with open(video_path, "w") as f:
+        f.write("dummy video content")
+
+    try:
+        pv = PyHecateVideo(
+            path=video_path,
+            outdir=temp_outdir,
+            isumfreq=10,
+            vsumlength=5,
+            outro="outro.mp4",
+            vsum=True,
+            isum=True,
+            gifwidth=300,
+        )
+        assert pv.path == video_path
+        assert pv.outdir == temp_outdir
+        assert pv.isumfreq == 10
+        assert pv.vsumlength == 5
+        assert pv.outro == "outro.mp4"
+        assert pv.vsum is True
+        assert pv.isum is True
+        assert pv.gifwidth == 300
+        assert pv.base == os.path.basename(temp_outdir)
+    finally:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
+
+# Test _video_meta with mocked subprocess
+@patch("subprocess.run")
+def test_video_meta_success(mock_subprocess_run, temp_outdir):
+    """Test the _video_meta method on a successful ffprobe call."""
+    video_path = "test.mp4"
+    # Create a dummy video file for os.path.exists checks
+    with open(video_path, "w") as f:
+        f.write("dummy video content")
+
+    mock_ffprobe_output = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "duration": "120.0",
+                "width": 1920,
+                "height": 1080,
+            },
+            {"codec_type": "audio"},
+        ],
+        "format": {"duration": "120.0"},
+    }
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = json.dumps(mock_ffprobe_output)
+    mock_result.stderr = ""
+    mock_subprocess_run.return_value = mock_result
+
+    pv = PyHecateVideo(path=video_path, outdir=temp_outdir)
+
+    try:
+        vmeta, vseconds, vwidth, vheight, vaudio = pv._video_meta(video_path)
+
+        assert vmeta is True
+        assert vseconds == 120
+        assert vwidth == 1920
+        assert vheight == 1080
+        assert vaudio is True
+        mock_subprocess_run.assert_called_once()
+        args, _ = mock_subprocess_run.call_args
+        assert "ffprobe" in args[0]
+        assert video_path in args[0]
+    finally:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
+@patch("subprocess.run")
+def test_video_meta_ffprobe_failure(mock_subprocess_run, temp_outdir):
+    """Test the _video_meta method when ffprobe fails."""
+    video_path = "fail.mp4"
+    with open(video_path, "w") as f:
+        f.write("dummy video content")
+
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    mock_result.stderr = "ffprobe error"
+    mock_subprocess_run.return_value = mock_result
+
+    pv = PyHecateVideo(path=video_path, outdir=temp_outdir)
+    try:
+        vmeta, vseconds, vwidth, vheight, vaudio = pv._video_meta(video_path)
+        assert vmeta is False
+        assert vseconds == 0
+        assert vwidth == 0
+        assert vheight == 0
+        assert vaudio is False
+    finally:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
+# Test prep_outfolders
+def test_prep_outfolders(temp_outdir):
+    """Test that prep_outfolders creates the necessary directories."""
+    video_path = "dummy_prep.mp4"
+    pv = PyHecateVideo(path=video_path, outdir=temp_outdir)
+    # Simulate metadata that would be set by _video_meta
+    pv.vseconds = 600
+    pv.vwidth = 1280
+    pv.isumfreq = 30 # ensure numsnaps is reasonable
+    pv.isum = True
+    pv.vsum = True
+
+    pv.prep_outfolders()
+
+    assert os.path.exists(pv.jpgdir)
+    assert os.path.exists(pv.gifdir)
+    assert os.path.exists(pv.gifsumdir)
+    assert os.path.exists(pv.mp4dir)
+    assert pv.numsnaps == max(600 // 30, 10)
+    assert pv.mp4tmppath is not None
+    assert pv.mp4sumpath is not None
+    assert pv.mp4outpath is not None
+
+# Minimal test for PyHecate instantiation (main class)
+@patch("pyhecate.PyHecateVideo._video_meta")
+def test_pyhecate_instantiation(mock_video_meta, tmp_path):
+    """Test basic instantiation of the main PyHecate class."""
+    # Mock _video_meta to prevent actual ffprobe calls and return benign values
+    mock_video_meta.return_value = (True, 60, 1280, 720, False) # meta, secs, w, h, audio
+
+    # PyHecate's __init__ tries to process videos, so we need to be careful
+    # or mock heavily. For a simple instantiation test, provide a non-existent path
+    # or a path that results in no videos if dir_mode=True
+    dummy_file_path = tmp_path / "non_existent_video.mp4"
+
+    # This will log an error but shouldn't crash if path doesn't exist
+    ph = pyhecate.PyHecate(path=str(dummy_file_path))
+    assert isinstance(ph, pyhecate.PyHecate)
+    assert not ph.vpaths  # No video paths should be found
+    # self.outdir might not be set if path doesn't exist and __init__ returns early
+
+    dummy_dir_path = tmp_path / "empty_video_dir"
+    dummy_dir_path.mkdir()
+    ph_dir = pyhecate.PyHecate(path=str(dummy_dir_path), dir_mode=True)
+    assert isinstance(ph_dir, pyhecate.PyHecate)
+    assert not ph_dir.vpaths  # No videos in the directory
+    # In dir_mode with existing dir, outdir should default to the input path if not specified
+    assert hasattr(ph_dir, "outdir") and ph_dir.outdir == str(dummy_dir_path)
+
+
+    # Test with a custom output directory
+    custom_outdir_path = tmp_path / "custom_out"
+    # Use a dummy file that exists for this part of the test to ensure outdir is processed
+    dummy_existing_file_for_outdir_test = tmp_path / "exists.mp4"
+    dummy_existing_file_for_outdir_test.write_text("content")
+
+    ph_custom_out = pyhecate.PyHecate(path=str(dummy_existing_file_for_outdir_test), outdir=str(custom_outdir_path))
+    assert hasattr(ph_custom_out, "outdir") and ph_custom_out.outdir == str(custom_outdir_path)
+    assert os.path.exists(custom_outdir_path)  # outdir should be created
+
+# It's good practice to also have a test for the CLI.
+# This is more involved as it requires mocking subprocess calls for hecate and ffmpeg.
+# For now, we'll add a placeholder or a very simple CLI test.
+from pyhecate.__main__ import cli as get_cli_parser
+import subprocess
+
+def test_cli_version():
+    """Test that the CLI parser has a version action."""
+    parser = get_cli_parser()
+    with pytest.raises(SystemExit) as e:
+        parser.parse_args(["--version"])
+    assert e.value.code == 0 # Successful exit for --version
+
+@patch("pyhecate.PyHecate.__init__", return_value=None) # Mock PyHecate instantiation
+def test_main_cli_runs(mock_pyhecate_init, caplog, tmp_path):
+    """ Test that the main CLI function can be called. """
+    from pyhecate.__main__ import main as pyhecate_main
+
+    dummy_video = tmp_path / "video.mp4"
+    dummy_video.write_text("content")
+
+    # Test with minimal arguments
+    with patch.object(sys, "argv", ["pyhecate", str(dummy_video)]):
+        pyhecate_main()
+        mock_pyhecate_init.assert_called_once()
+        # Check some default values passed to PyHecate
+        args, kwargs = mock_pyhecate_init.call_args
+        assert kwargs['path'] == str(dummy_video)
+        assert kwargs['dir_mode'] is False
+        assert kwargs['isumfreq'] == ISUMFREQ
+
+    mock_pyhecate_init.reset_mock()
+    # Test with --dir mode
+    dummy_dir = tmp_path / "videos"
+    dummy_dir.mkdir()
+    (dummy_dir / "vid1.mp4").write_text("v1")
+
+    with patch.object(sys, "argv", ["pyhecate", str(dummy_dir), "--dir"]):
+        pyhecate_main()
+        mock_pyhecate_init.assert_called_once()
+        args, kwargs = mock_pyhecate_init.call_args
+        assert kwargs['path'] == str(dummy_dir)
+        assert kwargs['dir_mode'] is True
+        # PyHecate itself will find vpaths, we just check the path argument here
+
+# Need to import json for the mock_ffprobe_output
+import json
+# Need to import sys for patching sys.argv
+import sys
+</file>
+
+<file path=".gitignore">
+.idea/
+.dccache
+*.code-workspace
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# celery beat schedule file
+celerybeat-schedule
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+
+app/build/
+</file>
+
+<file path="LICENSE">
+MIT License
+
+Copyright (c) 2020 Adam Twardoch
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</file>
+
+<file path="pyproject.toml">
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyhecate"
+dynamic = ["version"] # Version will be supplied by hatch-vcs
+description = "Automagically generate thumbnails, animated GIFs, and summaries from videos (on macOS)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [
+    { name = "Adam Twardoch", email = "adam+github@twardoch.com" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "ffmpeg-python>=0.2.0",
+    "Send2Trash>=1.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+]
+
+[project.urls]
+Homepage = "https://twardoch.github.io/pyhecate/"
+Source = "https://github.com/twardoch/pyhecate/"
+
+[project.scripts]
+pyhecate = "pyhecate.__main__:main"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+tag_regex = "(?:__version__\\s*=\\s*['\\\"]|refs/tags/v)(?P<version>[^'\\\"]+)" # Adjusted regex if needed
+
+[tool.hatch.build.targets.sdist]
+include = ["/pyhecate", "/tests"] # Adjusted to include tests later
+
+[tool.hatch.build.targets.wheel]
+packages = ["pyhecate"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "PL", "TID"]
+ignore = [
+    "E501", # Line too long, handled by formatter
+    "PLR0913", # Too many arguments
+    "PLR2004", # Magic value used in comparison
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true # For now, until stubs for dependencies are checked
+check_untyped_defs = true
+disallow_untyped_defs = true
+</file>
+
+<file path="pytest.ini">
+[pytest]
+addopts = --cov=pyhecate --cov-report=xml --cov-report=term
+testpaths = tests
+</file>
+
+<file path="README.md">
+# pyhecate
+
+Automagically generate thumbnails, animated GIFs, and summaries from videos on macOS.
+
+Python CLI wrapper for https://github.com/twardoch/hecate
+
+## Installation
+
+First [install `hecate`](https://github.com/twardoch/hecate/blob/master/README.md), then install this via `python3 -m install --user --upgrade git+https://github.com/twardoch/pyhecate/`
+
+## Usage
+
+```
+usage: pyhecate [-h] [-d] [-o output_folder] [-i secs] [-g px] [-I] [-s secs]
+                [-a path_to_outro_video] [-S] [-v] [-V]
+                path
+
+optional arguments:
+  -h, --help            show this help message and exit
+
+paths and folders:
+  path                  path to video file
+  -d, --dir             path is a folder with video files
+  -o output_folder, --outdir output_folder
+                        output folder for created folders
+
+make images:
+  -i secs, --image-every secs
+                        JPG snapshot frequency in seconds (default: 30)
+  -g px, --gif-width px
+                        GIF width (default: 360)
+  -I, --skip-images     skip making JPG & GIF images
+
+make video summary:
+  -s secs, --video-length secs
+                        video summary length in seconds (default: 16)
+  -a path_to_outro_video, --outro path_to_outro_video
+                        append outro video to summary video
+  -S, --skip-video-summary
+                        skip making the video summary MP4 file
+
+other:
+  -v, --verbose         -v show progress, -vv show debug
+  -V, --version         show version and exit
+```
+
+
+## Requirements
+
+- macOS 11 (may work on older or other systems)
+- Python 3.8+ (tested on 3.9)
+
+## Credits
+
+- Copyright (c) 2021 Adam Twardoch
+- [MIT license](./LICENSE)
+</file>
+
+<file path="requirements.txt">
+ffmpeg-python>=0.2.0
+Send2Trash>=1.5.0
+</file>
+
+<file path="setup.py">
+#!/usr/bin/env python3
+
+import os
+import re
+
+from setuptools import find_packages, setup
+
+NAME = "pyhecate"
+
+readme_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md")
+with open(readme_file, encoding="utf-8") as f:
+    readme = f.read()
+
+
+def get_version(*args):
+    with open(os.path.join(NAME, "__init__.py"), encoding="utf-8") as f:
+        verstrline = f.read()
+    VSRE = r"^__version__ = ['\"]([^'\"]*)['\"]"
+    if mo := re.search(VSRE, verstrline, re.M):
+        return mo[1]
+    return "undefined"
+
+
+def get_requirements(*args):
+    """Get requirements from pip requirement files."""
+    requirements = set()
+    with open(get_absolute_path(*args), encoding="utf-8") as handle:
+        for line_content in handle:
+            # Strip comments.
+            line = re.sub(r"^#.*|\s#.*", "", line_content)
+            # Ignore empty lines
+            if line and not line.isspace():
+                requirements.add(re.sub(r"\s+", "", line))
+    return sorted(requirements)
+
+
+def get_absolute_path(*args):
+    """Transform relative pathnames into absolute pathnames."""
+    directory = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(directory, *args)
+
+
+setup(
+    name=NAME,
+    author="Adam Twardoch",
+    author_email="adam+github@twardoch.com",
+    url=f"https://twardoch.github.io/{NAME}/",
+    project_urls={"Source": f"https://github.com/twardoch/{NAME}/"},
+    version=get_version(),
+    license="MIT",
+    description="Automagically generate thumbnails, animated GIFs, and summaries from videos (on macOS)",
+    long_description=readme,
+    long_description_content_type="text/markdown",
+    python_requires=">=3.7",
+    install_requires=get_requirements("requirements.txt"),
+    extras_require={"dev": ["twine>=3.2.0"]},
+    packages=find_packages(),
+    classifiers=[
+        "Development Status :: 4 - Beta",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3.8",
+    ],
+    keywords="macos screenshot video computer-vision thumbnails frames video-summarization animated-gifs macosx video-thumbnail gif-maker generating-thumbnails thumbnail-images macos-app video-thumbnail-generator gif-thumbnail shot-boundary-detection video-summaries hecate extracting-key-frames gui",
+    entry_points="""
+        [console_scripts]
+        pyhecate=pyhecate.__main__:main
+        """,
+)
+</file>
+
+</files>

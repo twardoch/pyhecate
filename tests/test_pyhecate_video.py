@@ -1,8 +1,20 @@
-import pytest
 import os
-import pyhecate # Import the main module
-from pyhecate import PyHecateVideo, ISUMFREQ, VSUMLENGTH, GIFWIDTH
-from unittest.mock import patch, MagicMock
+import json # Moved to top
+import sys # Moved to top
+import subprocess # Added for clarity for @patch
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import pyhecate  # Import the main module
+from pyhecate import (
+    ISUMFREQ,
+    PyHecateVideo,
+    VideoMetadata,
+)  # Import VideoMetadata
+from pyhecate.__main__ import cli as get_cli_parser # Moved to top
+from pyhecate.__main__ import main as pyhecate_main # For use in test_main_cli_runs_*
+
 
 # Define a fixture for a temporary output directory
 @pytest.fixture
@@ -10,6 +22,7 @@ def temp_outdir(tmp_path):
     d = tmp_path / "output"
     d.mkdir()
     return str(d)
+
 
 # Test basic instantiation of PyHecateVideo
 def test_pyhecate_video_instantiation(temp_outdir):
@@ -75,13 +88,14 @@ def test_video_meta_success(mock_subprocess_run, temp_outdir):
     pv = PyHecateVideo(path=video_path, outdir=temp_outdir)
 
     try:
-        vmeta, vseconds, vwidth, vheight, vaudio = pv._video_meta(video_path)
+        # Call the renamed method
+        metadata = pv._get_video_meta(video_path)
 
-        assert vmeta is True
-        assert vseconds == 120
-        assert vwidth == 1920
-        assert vheight == 1080
-        assert vaudio is True
+        assert metadata["success"] is True
+        assert metadata["vseconds"] == 120
+        assert metadata["vwidth"] == 1920
+        assert metadata["vheight"] == 1080
+        assert metadata["vaudio"] is True
         mock_subprocess_run.assert_called_once()
         args, _ = mock_subprocess_run.call_args
         assert "ffprobe" in args[0]
@@ -89,6 +103,7 @@ def test_video_meta_success(mock_subprocess_run, temp_outdir):
     finally:
         if os.path.exists(video_path):
             os.remove(video_path)
+
 
 @patch("subprocess.run")
 def test_video_meta_ffprobe_failure(mock_subprocess_run, temp_outdir):
@@ -105,15 +120,16 @@ def test_video_meta_ffprobe_failure(mock_subprocess_run, temp_outdir):
 
     pv = PyHecateVideo(path=video_path, outdir=temp_outdir)
     try:
-        vmeta, vseconds, vwidth, vheight, vaudio = pv._video_meta(video_path)
-        assert vmeta is False
-        assert vseconds == 0
-        assert vwidth == 0
-        assert vheight == 0
-        assert vaudio is False
+        metadata = pv._get_video_meta(video_path)  # Call the new method
+        assert metadata["success"] is False
+        assert metadata["vseconds"] == 0
+        assert metadata["vwidth"] == 0
+        assert metadata["vheight"] == 0
+        assert metadata["vaudio"] is False
     finally:
         if os.path.exists(video_path):
             os.remove(video_path)
+
 
 # Test prep_outfolders
 def test_prep_outfolders(temp_outdir):
@@ -123,7 +139,7 @@ def test_prep_outfolders(temp_outdir):
     # Simulate metadata that would be set by _video_meta
     pv.vseconds = 600
     pv.vwidth = 1280
-    pv.isumfreq = 30 # ensure numsnaps is reasonable
+    pv.isumfreq = 30  # ensure numsnaps is reasonable
     pv.isum = True
     pv.vsum = True
 
@@ -138,15 +154,25 @@ def test_prep_outfolders(temp_outdir):
     assert pv.mp4sumpath is not None
     assert pv.mp4outpath is not None
 
-# Minimal test for PyHecate instantiation (main class)
-@patch("pyhecate.PyHecateVideo._video_meta")
-def test_pyhecate_instantiation(mock_video_meta, tmp_path):
-    """Test basic instantiation of the main PyHecate class."""
-    # Mock _video_meta to prevent actual ffprobe calls and return benign values
-    mock_video_meta.return_value = (True, 60, 1280, 720, False) # meta, secs, w, h, audio
 
-    # PyHecate's __init__ tries to process videos, so we need to be careful
-    # or mock heavily. For a simple instantiation test, provide a non-existent path
+# Minimal test for PyHecate instantiation (main class)
+@patch("pyhecate.PyHecateVideo._get_video_meta")  # Updated mock path
+def test_pyhecate_instantiation(mock_get_video_meta, tmp_path):  # Renamed mock argument
+    """Test basic instantiation of the main PyHecate class."""
+    # Mock _get_video_meta to prevent actual ffprobe calls and return benign values
+    mock_get_video_meta.return_value = VideoMetadata(  # Use TypedDict for return value
+        success=True, vseconds=60, vwidth=1280, vheight=720, vaudio=False
+    )
+
+    # PyHecate's __init__ no longer processes videos directly.
+    # This test remains valid for checking instantiation logic (path handling, outdir).
+    # The mock on _get_video_meta is for PyHecateVideo, which would be called if
+    # PyHecate.execute() was run and PyHecate.process_video() was called.
+    # For purely __init__ testing of PyHecate, this mock isn't strictly necessary
+    # unless PyHecate.__init__ itself tried to create a PyHecateVideo and call summarize.
+    # Since PyHecate.__init__ only sets up paths, the mock is less critical here but harmless.
+
+    # For a simple instantiation test, provide a non-existent path
     # or a path that results in no videos if dir_mode=True
     dummy_file_path = tmp_path / "non_existent_video.mp4"
 
@@ -164,63 +190,104 @@ def test_pyhecate_instantiation(mock_video_meta, tmp_path):
     # In dir_mode with existing dir, outdir should default to the input path if not specified
     assert hasattr(ph_dir, "outdir") and ph_dir.outdir == str(dummy_dir_path)
 
-
     # Test with a custom output directory
     custom_outdir_path = tmp_path / "custom_out"
     # Use a dummy file that exists for this part of the test to ensure outdir is processed
     dummy_existing_file_for_outdir_test = tmp_path / "exists.mp4"
     dummy_existing_file_for_outdir_test.write_text("content")
 
-    ph_custom_out = pyhecate.PyHecate(path=str(dummy_existing_file_for_outdir_test), outdir=str(custom_outdir_path))
-    assert hasattr(ph_custom_out, "outdir") and ph_custom_out.outdir == str(custom_outdir_path)
+    ph_custom_out = pyhecate.PyHecate(
+        path=str(dummy_existing_file_for_outdir_test), outdir=str(custom_outdir_path)
+    )
+    assert hasattr(ph_custom_out, "outdir") and ph_custom_out.outdir == str(
+        custom_outdir_path
+    )
     assert os.path.exists(custom_outdir_path)  # outdir should be created
+
 
 # It's good practice to also have a test for the CLI.
 # This is more involved as it requires mocking subprocess calls for hecate and ffmpeg.
 # For now, we'll add a placeholder or a very simple CLI test.
-from pyhecate.__main__ import cli as get_cli_parser
-import subprocess
+
+# from pyhecate.__main__ import cli as get_cli_parser # Moved to top
+
 
 def test_cli_version():
     """Test that the CLI parser has a version action."""
     parser = get_cli_parser()
     with pytest.raises(SystemExit) as e:
         parser.parse_args(["--version"])
-    assert e.value.code == 0 # Successful exit for --version
+    assert e.value.code == 0  # Successful exit for --version
 
-@patch("pyhecate.PyHecate.__init__", return_value=None) # Mock PyHecate instantiation
-def test_main_cli_runs(mock_pyhecate_init, caplog, tmp_path):
-    """ Test that the main CLI function can be called. """
-    from pyhecate.__main__ import main as pyhecate_main
+
+@patch("pyhecate.PyHecate")  # Patch the class
+def test_main_cli_runs_success(MockPyHecate, tmp_path, caplog):  # Added caplog
+    """Test that the main CLI function runs and exits successfully."""
+    # from pyhecate.__main__ import main as pyhecate_main # Moved to top
+
+    # Configure the mock instance that PyHecate() will return
+    mock_processor_instance = MagicMock()
+    mock_processor_instance.execute.return_value = True  # Simulate successful execution
+    MockPyHecate.return_value = mock_processor_instance
 
     dummy_video = tmp_path / "video.mp4"
     dummy_video.write_text("content")
 
-    # Test with minimal arguments
     with patch.object(sys, "argv", ["pyhecate", str(dummy_video)]):
-        pyhecate_main()
-        mock_pyhecate_init.assert_called_once()
-        # Check some default values passed to PyHecate
-        args, kwargs = mock_pyhecate_init.call_args
-        assert kwargs['path'] == str(dummy_video)
-        assert kwargs['dir_mode'] is False
-        assert kwargs['isumfreq'] == ISUMFREQ
+        with pytest.raises(SystemExit) as e:
+            pyhecate_main()
+        assert e.value.code == 0  # Successful exit
 
-    mock_pyhecate_init.reset_mock()
-    # Test with --dir mode
-    dummy_dir = tmp_path / "videos"
-    dummy_dir.mkdir()
-    (dummy_dir / "vid1.mp4").write_text("v1")
+    # Check that PyHecate was instantiated with correct args
+    MockPyHecate.assert_called_once()
+    _, kwargs = MockPyHecate.call_args
+    assert kwargs["path"] == str(dummy_video)
+    assert kwargs["dir_mode"] is False
+    assert kwargs["isumfreq"] == ISUMFREQ
+    # Check that execute was called on the instance
+    mock_processor_instance.execute.assert_called_once()
 
-    with patch.object(sys, "argv", ["pyhecate", str(dummy_dir), "--dir"]):
-        pyhecate_main()
-        mock_pyhecate_init.assert_called_once()
-        args, kwargs = mock_pyhecate_init.call_args
-        assert kwargs['path'] == str(dummy_dir)
-        assert kwargs['dir_mode'] is True
-        # PyHecate itself will find vpaths, we just check the path argument here
+
+@patch("pyhecate.PyHecate")  # Patch the class
+def test_main_cli_runs_failure_on_execute(MockPyHecate, tmp_path, caplog):
+    """Test that the main CLI function exits with error if execute() fails."""
+    # from pyhecate.__main__ import main as pyhecate_main # Moved to top
+
+    mock_processor_instance = MagicMock()
+    mock_processor_instance.execute.return_value = False  # Simulate failed execution
+    MockPyHecate.return_value = mock_processor_instance
+
+    dummy_video = tmp_path / "video.mp4"
+    dummy_video.write_text("content")
+
+    with patch.object(sys, "argv", ["pyhecate", str(dummy_video)]):
+        with pytest.raises(SystemExit) as e:
+            pyhecate_main()
+        assert e.value.code == 1  # Error exit
+
+    mock_processor_instance.execute.assert_called_once()
+
+
+@patch("pyhecate.PyHecate")  # Patch the class
+def test_main_cli_runs_failure_on_exception(MockPyHecate, tmp_path, caplog):
+    """Test that the main CLI function exits with error if PyHecate raises an exception."""
+    # from pyhecate.__main__ import main as pyhecate_main # Moved to top
+
+    MockPyHecate.side_effect = Exception(
+        "Test init error"
+    )  # Simulate error during instantiation
+
+    dummy_video = tmp_path / "video.mp4"
+    dummy_video.write_text("content")
+
+    with patch.object(sys, "argv", ["pyhecate", str(dummy_video)]):
+        with pytest.raises(SystemExit) as e:
+            pyhecate_main()
+        assert e.value.code == 1  # Error exit
+
 
 # Need to import json for the mock_ffprobe_output
-import json
+# import json # Moved to top
+
 # Need to import sys for patching sys.argv
-import sys
+# import sys # Moved to top

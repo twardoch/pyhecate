@@ -15,6 +15,15 @@ APP_VERSION = get_version("pyhecate")
 
 
 def cli() -> ArgumentParser:
+    """
+    Configures and returns the ArgumentParser for the PyHecate CLI.
+
+    Defines all command-line arguments, their help messages, defaults,
+    and how they are processed. Arguments are organized into logical groups.
+
+    Returns:
+        An ArgumentParser instance configured for PyHecate.
+    """
     parser = ArgumentParser(prog="pyhecate")
 
     path_group = parser.add_argument_group("paths and folders")
@@ -109,9 +118,14 @@ def cli() -> ArgumentParser:
     return parser
 
 
-def main(
-    *args: Any, **kwargs: Any
-) -> None:  # Added type hints for args/kwargs though they are not used
+def main() -> None:
+    """
+    Main function for the PyHecate command-line interface.
+
+    Parses command-line arguments, sets up logging, instantiates PyHecate,
+    and executes the video processing tasks. Exits with status 0 on success,
+    1 on failure.
+    """
     arg_parser = cli()
     opts: Namespace = arg_parser.parse_args()
 
@@ -150,15 +164,22 @@ def main(
     logging.debug(f"Running with options: {pyhecate_opts}")
 
     # Instantiate and run PyHecate
+    exit_code = 0
     try:
-        _ = pyhecate.PyHecate(**pyhecate_opts)
-        # If PyHecate.__init__ can fail and return None or raise specific exceptions, handle here.
-        # For now, assume it either completes or logs errors internally.
-        # If there's a main processing method in PyHecate that needs to be called after init, do it here.
-        # Based on current PyHecate, processing starts in __init__.
+        processor = pyhecate.PyHecate(**pyhecate_opts)
+        if not processor.execute():
+            logging.error("PyHecate processing completed with errors.")
+            exit_code = 1
+        else:
+            logging.info("PyHecate processing completed successfully.")
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}", exc_info=True)
-        sys.exit(1)
+        logging.error(
+            f"An unexpected error occurred during PyHecate execution: {e}",
+            exc_info=True,
+        )
+        exit_code = 1
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

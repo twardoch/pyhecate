@@ -25,6 +25,13 @@ dependencies = [
     "ffmpeg-python>=0.2.0",
     "Send2Trash>=1.5.0",
 ]
+keywords = [
+    "macos", "screenshot", "video", "computer-vision", "thumbnails", "frames",
+    "video-summarization", "animated-gifs", "macosx", "video-thumbnail", "gif-maker",
+    "generating-thumbnails", "thumbnail-images", "macos-app", "video-thumbnail-generator",
+    "gif-thumbnail", "shot-boundary-detection", "video-summaries", "hecate",
+    "extracting-key-frames", "gui",
+]
 
 [project.optional-dependencies]
 dev = [
